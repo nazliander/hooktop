@@ -2,8 +2,10 @@
 # GitHub release with the tarballs, and update the Homebrew tap.
 #
 # For the tap update, add a repository secret HOMEBREW_TAP_TOKEN: a
-# fine-grained token with "Contents: read and write" on
-# nazliander/homebrew-tap. Without it the release still happens and the
+# fine-grained token on nazliander/homebrew-tap with "Contents" and "Pull
+# requests" set to read and write. The formula change goes in as a pull
+# request that the workflow merges, so the tap's main branch can require
+# pull requests. Without the secret the release still happens and the
 # formula is attached to it, ready to copy by hand.
 name: Release
 
@@ -122,7 +124,26 @@ jobs:
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="hooktop-$TAG"
+          git checkout -b "$branch"
           git add Formula/hooktop.rb
           if git diff --cached --quiet; then echo "formula unchanged"; exit 0; fi
-          git commit -m "hooktop ${TAG#v}"
-          git push
+          git commit -m "feat: hooktop ${TAG#v}"
+          git push --force -u origin "$branch"
+
+          # main only takes pull requests: open one and merge it.
+          export GH_TOKEN="$TAP_TOKEN"
+          pr=$(gh pr list --repo "$TAP" --head "$branch" --state open --json url --jq '.[0].url')
+          if [ -z "$pr" ]; then
+            pr=$(gh pr create --repo "$TAP" --base main --head "$branch" \
+              --title "feat: hooktop ${TAG#v}" \
+              --body "Updates the hooktop formula to $TAG. Opened by [hooktop's release workflow](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).")
+          fi
+          echo "Pull request: $pr"
+          # GitHub needs a moment to work out whether a new PR can merge.
+          for _ in 1 2 3 4 5 6; do
+            if gh pr merge "$pr" --repo "$TAP" --squash --delete-branch; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::couldn't merge $pr; merge it by hand"
+          exit 1
