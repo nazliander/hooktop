@@ -3,17 +3,17 @@ resolver = "3"
 members = ["crates/hooktop-core", "crates/hooktop-server"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # Let chains need 1.88. Cargo picks dependency versions that support this.
 rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/nazliander/hooktop"
-homepage = "https://github.com/nazliander/hooktop"
+homepage = "https://nazliander.github.io/writing/hooktop-experimenting-local-claude-code-observability/"
 authors = ["Nazli Ander"]
 
 [workspace.dependencies]
-hooktop-core = { path = "crates/hooktop-core" }
+hooktop-core = { path = "crates/hooktop-core", version = "=0.1.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

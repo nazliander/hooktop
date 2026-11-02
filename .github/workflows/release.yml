@@ -7,6 +7,10 @@
 # request that the workflow merges, so the tap's main branch can require
 # pull requests. Without the secret the release still happens and the
 # formula is attached to it, ready to copy by hand.
+#
+# To publish to crates.io too, add a repository secret CARGO_REGISTRY_TOKEN:
+# a crates.io API token with the "publish-update" scope (and "publish-new"
+# for the very first release). Without it, the crates.io job is skipped.
 name: Release
 
 on:
@@ -40,6 +44,29 @@ jobs:
             exit 1
           fi
 
+  crates:
+    needs: check
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - name: Publish hooktop-core and hooktop
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::notice::no CARGO_REGISTRY_TOKEN secret, skipping crates.io"
+            exit 0
+          fi
+          version="${TAG#v}"
+          # A re-run must not fail on a version that's already up.
+          if curl -sf "https://index.crates.io/ho/ok/hooktop" | grep -q "\"vers\":\"$version\""; then
+            echo "hooktop $version is already on crates.io"
+            exit 0
+          fi
+          cargo publish --workspace --locked
+
   build:
     needs: check
     strategy:
@@ -66,7 +93,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p hooktop-server
+        run: cargo build --release --locked --target ${{ matrix.target }} -p hooktop
       - name: Package
         shell: bash
         run: |

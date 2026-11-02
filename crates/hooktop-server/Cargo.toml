@@ -1,5 +1,5 @@
 [package]
-name = "hooktop-server"
+name = "hooktop"
 description = "See Claude Code's tool calls, subagents and CPU/RAM use, live in your terminal"
 readme = "../../README.md"
 keywords = ["claude-code", "agents", "tui", "observability", "ratatui"]
@@ -11,6 +11,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 homepage.workspace = true
+
+# The library keeps its old name so the code and tests read `hooktop_server::…`.
+[lib]
+name = "hooktop_server"
+path = "src/lib.rs"
 
 [[bin]]
 name = "hooktop"

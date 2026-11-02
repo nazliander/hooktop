@@ -18,7 +18,7 @@ It's one small Rust binary that runs on your machine. Nothing leaves your comput
 ## Quick start
 
 ```sh
-brew install nazliander/tap/hooktop   # or, from source: cargo install --locked --path crates/hooktop-server
+brew install nazliander/tap/hooktop   # or: cargo install --locked hooktop
 hooktop hooks install                 # point Claude Code at hooktop (backs up settings.json first)
 hooktop                               # open the terminal UI
 ```

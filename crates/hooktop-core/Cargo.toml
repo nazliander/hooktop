@@ -1,6 +1,7 @@
 [package]
 name = "hooktop-core"
 description = "Event model, task graph and statistics behind hooktop, a live view of Claude Code's tool calls and hardware use"
+readme = "README.md"
 keywords = ["claude-code", "agents", "hooks"]
 categories = ["development-tools"]
 version.workspace = true
