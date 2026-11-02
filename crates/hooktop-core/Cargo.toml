@@ -1,0 +1,16 @@
+[package]
+name = "hooktop-core"
+description = "Event model, task graph and statistics behind hooktop, a live view of Claude Code's tool calls and hardware use"
+keywords = ["claude-code", "agents", "hooks"]
+categories = ["development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,45 @@
+[package]
+name = "hooktop-server"
+description = "See Claude Code's tool calls, subagents and CPU/RAM use, live in your terminal"
+readme = "../../README.md"
+keywords = ["claude-code", "agents", "tui", "observability", "ratatui"]
+categories = ["command-line-utilities", "development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "hooktop"
+path = "src/main.rs"
+
+[dependencies]
+hooktop-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+ratatui = "0.30"
+rmp-serde = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "fs"] }
+tokio-tungstenite = "0.27"
+unicode-width = "0.2"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+getrandom = "0.4.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

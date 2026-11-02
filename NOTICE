@@ -1,0 +1,13 @@
+hooktop
+Copyright 2026 Nazli Ander
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Exception: the knight artwork (docs/knight.png) is by Nazli Ander and
+licensed under Creative Commons Attribution 4.0 International (CC BY 4.0),
+not Apache-2.0. See docs/ARTWORK.md.
+
+hooktop binaries include SQLite (public domain, https://sqlite.org) through
+the rusqlite crate's bundled build, and Rust crates under permissive
+licences (MIT, Apache-2.0, BSD, ISC, Zlib, MPL-2.0 and similar). Their
+licence texts are in each crate's source.
