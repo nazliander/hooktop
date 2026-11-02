@@ -142,8 +142,8 @@ struct TuiArgs {
     /// Playback speed for --demo.
     #[arg(long, default_value_t = 1.0)]
     speed: f64,
-    /// ayu-dark, ayu-mirage, ayu-light or terminal [default: ayu-dark with
-    /// 24-bit colour, terminal otherwise]
+    /// ayu-dark or ayu-light [default: ayu-light if the terminal says its
+    /// background is light, else ayu-dark]
     #[arg(long, env = "HOOKTOP_THEME", value_parser = parse_theme)]
     theme: Option<ThemeName>,
     /// Read the token from this file (see `hooktop serve --help`).
@@ -166,7 +166,7 @@ fn parse_idle(s: &str) -> Result<i64, String> {
 }
 
 fn parse_theme(s: &str) -> Result<ThemeName, String> {
-    ThemeName::parse(s).ok_or_else(|| format!("unknown theme {s:?}; try ayu-dark, ayu-mirage, ayu-light or terminal"))
+    ThemeName::parse(s).ok_or_else(|| format!("unknown theme {s:?}; try ayu-dark or ayu-light"))
 }
 
 #[derive(Subcommand)]

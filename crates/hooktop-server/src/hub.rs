@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 
 use crate::procs::Procs;
 use crate::store::{StoreWriter, StoredEvent};
+use crate::transcripts::Transcripts;
 
 /// One ingested event's effect on one session.
 #[derive(Debug)]
@@ -28,6 +29,7 @@ pub struct Hub {
     tx: broadcast::Sender<Arc<Update>>,
     store: Option<StoreWriter>,
     procs: Procs,
+    transcripts: Transcripts,
     /// Removed sessions: their stray events are dropped until a new
     /// `SessionStart` (a resumed session) brings them back.
     removed: Mutex<HashSet<String>>,
@@ -42,6 +44,7 @@ impl Hub {
             tx,
             store,
             procs: Procs::default(),
+            transcripts: Transcripts::default(),
             removed: Mutex::default(),
         }
     }
@@ -198,6 +201,31 @@ impl Hub {
             })
             .map(|g| g.session_id.clone())
             .collect()
+    }
+
+    pub fn transcripts(&self) -> &Transcripts {
+        &self.transcripts
+    }
+
+    /// Record usage read from a transcript, unless it's already recorded
+    /// with the same numbers (transcripts are re-read after a restart).
+    pub fn ingest_usage(&self, session_id: &str, u: hooktop_core::usage::Usage) -> bool {
+        {
+            let map = self.sessions.read().unwrap();
+            let Some(g) = map.get(session_id) else { return false };
+            let same = g.usage.iter().any(|x| {
+                x.message_id == u.message_id
+                    && (x.input, x.output, x.cache_read, x.cache_write_5m, x.cache_write_1h)
+                        == (u.input, u.output, u.cache_read, u.cache_write_5m, u.cache_write_1h)
+                    && u.tool_use_ids.iter().all(|t| x.tool_use_ids.contains(t))
+            });
+            if same {
+                return false;
+            }
+        }
+        let at = if u.at_ms > 0 { u.at_ms } else { crate::now_ms() };
+        self.ingest(u.to_payload(session_id), at, true);
+        true
     }
 
     /// Which Claude Code process belongs to which session.

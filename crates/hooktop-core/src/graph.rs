@@ -151,6 +151,8 @@ pub enum Delta {
     Edge(Edge),
     /// A CPU and memory reading; appended, never changed.
     Sample(Sample),
+    /// Tokens one model call used; upserted by message id.
+    Usage(crate::usage::Usage),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +170,10 @@ pub struct SessionGraph {
     /// is running and can see the session's process.
     #[serde(default)]
     pub samples: Vec<Sample>,
+    /// Tokens per model call, attributed to tasks. Read from Claude Code's
+    /// transcript, so it trails the hooks by a moment.
+    #[serde(default)]
+    pub usage: Vec<crate::usage::Usage>,
     #[serde(skip)]
     cur: Cursor,
 }
@@ -215,6 +221,7 @@ impl SessionGraph {
             tasks: Vec::new(),
             edges: Vec::new(),
             samples: Vec::new(),
+            usage: Vec::new(),
             cur: Cursor::default(),
         }
     }
@@ -305,6 +312,10 @@ impl SessionGraph {
                     self.samples.push(s.clone());
                 }
             }
+            Delta::Usage(u) => match self.usage.iter_mut().find(|x| x.message_id == u.message_id) {
+                Some(x) => *x = u.clone(),
+                None => self.usage.push(u.clone()),
+            },
         }
     }
 
@@ -315,6 +326,9 @@ impl SessionGraph {
         if let EventKind::Sample(s) = &ev.kind {
             self.samples.push(s.clone());
             return vec![Delta::Sample(s.clone())];
+        }
+        if let EventKind::Usage(u) = &ev.kind {
+            return vec![Delta::Usage(self.add_usage(u))];
         }
         let mut out = Vec::new();
         let at = ev.at_ms;
@@ -420,7 +434,7 @@ impl SessionGraph {
                 self.interrupt_running(at, &mut out);
                 self.cur.open_turn = None;
             }
-            EventKind::Notification { .. } | EventKind::Other { .. } | EventKind::Sample(_) => {}
+            EventKind::Notification { .. } | EventKind::Other { .. } | EventKind::Sample(_) | EventKind::Usage(_) => {}
         }
 
         out.push(Delta::Session {
@@ -431,6 +445,48 @@ impl SessionGraph {
             updated_ms: self.updated_ms,
         });
         out
+    }
+
+    /// The task that owns a tool call.
+    pub fn tools_owner(&self, tool_use_id: &str) -> Option<TaskId> {
+        self.cur.tools.get(tool_use_id).map(|(t, _)| *t)
+    }
+
+    /// Record one model call's usage, merged with earlier lines of the same
+    /// message, and work out which task it belongs to: the turn or
+    /// follower that owns its tool calls, else the follower by agent id,
+    /// else the prompt it was answering (by time).
+    fn add_usage(&mut self, u: &crate::usage::Usage) -> crate::usage::Usage {
+        let i = match self.usage.iter().position(|x| x.message_id == u.message_id) {
+            Some(i) => {
+                self.usage[i].merge(u);
+                i
+            }
+            None => {
+                self.usage.push(u.clone());
+                self.usage.len() - 1
+            }
+        };
+        let x = &self.usage[i];
+        let by_tool = x
+            .tool_use_ids
+            .iter()
+            .find_map(|id| self.cur.tools.get(id).map(|(t, _)| *t));
+        let by_agent = || x.agent_id.as_ref().and_then(|a| self.cur.subagents.get(a).copied());
+        let by_time = || {
+            self.tasks
+                .iter()
+                .rev()
+                .find(|t| {
+                    t.header.kind == TaskKind::Prompt
+                        && matches!(t.header.label.as_str(), "Prompt" | "Command")
+                        && t.header.started_ms <= x.at_ms
+                })
+                .map(|t| t.header.id)
+        };
+        let task = by_tool.or_else(by_agent).or_else(by_time);
+        self.usage[i].task = task;
+        self.usage[i].clone()
     }
 
     pub fn display_title(&self) -> String {
@@ -975,5 +1031,60 @@ mod tests {
         let back: Vec<Delta> = serde_json::from_str(&text).unwrap();
         assert_eq!(back, deltas);
         assert!(text.contains(r#""op":"task""#));
+    }
+
+    #[test]
+    fn usage_is_attributed_to_turns_followers_and_prompts() {
+        use crate::usage::Usage;
+        let mut s = Sim::new();
+        s.ev(None, EventKind::PromptSubmitted { prompt: "go".into() });
+        s.pre(None, "t1", "Read", json!({"file_path": "/a"}));
+        s.ev(
+            None,
+            EventKind::SubagentStarted {
+                agent_id: "ag".into(),
+                agent_type: "Explore".into(),
+            },
+        );
+        s.pre(Some("ag"), "t2", "Grep", json!({"pattern": "x"}));
+        let usage = |s: &mut Sim, id: &str, tools: &[&str], agent: Option<&str>, at: i64, out: u64| {
+            let u = Usage {
+                message_id: id.into(),
+                model: "claude-opus-5-5".into(),
+                at_ms: at,
+                output: out,
+                tool_use_ids: tools.iter().map(|t| t.to_string()).collect(),
+                agent_id: agent.map(str::to_string),
+                ..Default::default()
+            };
+            s.ev(None, EventKind::Usage(u))
+        };
+        let turn = s.g.tools_owner("t1").unwrap();
+        let follower = s.g.tools_owner("t2").unwrap();
+        let prompt =
+            s.g.tasks
+                .iter()
+                .find(|t| t.header.kind == TaskKind::Prompt)
+                .unwrap()
+                .header
+                .id;
+
+        usage(&mut s, "m1", &["t1"], None, 150, 10);
+        usage(&mut s, "m2", &[], Some("ag"), 450, 20);
+        usage(&mut s, "m3", &[], None, 9_999, 30); // the final reply
+        let d = usage(&mut s, "m1", &["t1"], None, 150, 99); // a later line of m1
+        let by_id = |id: &str| s.g.usage.iter().find(|u| u.message_id == id).unwrap().clone();
+        assert_eq!(by_id("m1").task, Some(turn));
+        assert_eq!(by_id("m2").task, Some(follower));
+        assert_eq!(by_id("m3").task, Some(prompt));
+        assert_eq!(s.g.usage.len(), 3, "merged by message id");
+        assert_eq!(by_id("m1").output, 99);
+        assert!(
+            matches!(&d[..], [Delta::Usage(u)] if u.output == 99),
+            "usage doesn't touch the session"
+        );
+        let updated = s.g.updated_ms;
+        usage(&mut s, "m4", &[], None, 1_000_000, 1);
+        assert_eq!(s.g.updated_ms, updated);
     }
 }

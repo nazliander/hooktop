@@ -9,6 +9,7 @@ hooktop is one Rust binary, `hooktop`, built from two crates. It receives Claude
 | [CPU, RAM and connection lifecycle](resources.md) | Finding Claude Code's process, sampling, closing dead sessions |
 | [HTTP and WebSocket protocol](protocol.md) | Endpoints, messages, batching, removal |
 | [Terminal UI](tui.md) | Attach vs embedded, event loop, views, graph layout |
+| [Token usage and cost](costs.md) | Reading usage from transcripts, matching it to tasks, the price table |
 | [Security](security.md) | Who could reach the server, the token, browser and DNS-rebinding defences, file permissions |
 
 ## Components

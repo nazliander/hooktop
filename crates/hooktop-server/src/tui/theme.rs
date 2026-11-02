@@ -1,60 +1,63 @@
-//! Colours for the TUI: the three official ayu palettes, plus a
-//! `terminal` theme of plain ANSI colours for terminals without 24-bit
-//! colour. The background is never painted, so the terminal's own shows.
+//! Colours for the TUI: the official ayu palettes, dark and light. The
+//! background is never painted, so the terminal's own shows through.
+//!
+//! On terminals without 24-bit colour, each ayu colour is drawn as its
+//! nearest match in the standard 256-colour palette, so the look survives.
+
+use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeName {
     Dark,
-    Mirage,
     Light,
-    Terminal,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 4] = [Self::Dark, Self::Mirage, Self::Light, Self::Terminal];
+    pub const ALL: [ThemeName; 2] = [Self::Dark, Self::Light];
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().replace(['_', ' '], "-").as_str() {
             "dark" | "ayu-dark" => Some(Self::Dark),
-            "mirage" | "ayu-mirage" => Some(Self::Mirage),
             "light" | "ayu-light" => Some(Self::Light),
-            "terminal" | "ansi" => Some(Self::Terminal),
             _ => None,
         }
     }
 
-    /// Ayu Dark on terminals that announce 24-bit colour, ANSI otherwise.
+    /// `HOOKTOP_THEME` if set; otherwise Ayu Light when the terminal says
+    /// its background is light (`COLORFGBG`), else Ayu Dark.
     pub fn detect() -> Self {
         if let Some(t) = std::env::var("HOOKTOP_THEME").ok().as_deref().and_then(Self::parse) {
             return t;
         }
-        match std::env::var("COLORTERM")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "truecolor" | "24bit" => Self::Dark,
-            _ => Self::Terminal,
-        }
+        let light_bg = std::env::var("COLORFGBG")
+            .ok()
+            .and_then(|v| v.rsplit(';').next().map(str::to_string))
+            .is_some_and(|bg| matches!(bg.as_str(), "7" | "15"));
+        if light_bg { Self::Light } else { Self::Dark }
     }
 
     pub fn next(self) -> Self {
-        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        Self::ALL[(i + 1) % Self::ALL.len()]
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Dark,
+        }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Dark => "Ayu Dark",
-            Self::Mirage => "Ayu Mirage",
             Self::Light => "Ayu Light",
-            Self::Terminal => "Terminal",
         }
     }
 
     pub fn theme(self) -> Theme {
+        let t = self.palette();
+        if truecolor() { t } else { t.to_256() }
+    }
+
+    fn palette(self) -> Theme {
         let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
         match self {
             Self::Dark => Theme {
@@ -74,23 +77,6 @@ impl ThemeName {
                 line: rgb(0x333b44),
                 select: Some(rgb(0x1f2a38)),
             },
-            Self::Mirage => Theme {
-                ink: rgb(0xcccac2),
-                accent: rgb(0xffcc66),
-                prompt: rgb(0xffcd66),
-                turn: rgb(0xffa659),
-                sub: rgb(0x95e6cb),
-                read: rgb(0x73d0ff),
-                write: rgb(0xd5ff80),
-                exec: rgb(0xdfbfff),
-                other: rgb(0x6e7c8f),
-                ok: rgb(0xd5ff80),
-                err: rgb(0xf28779),
-                muted: rgb(0x9a998f),
-                faint: rgb(0x707a8c),
-                line: rgb(0x4a5568),
-                select: Some(rgb(0x33415e)),
-            },
             Self::Light => Theme {
                 ink: rgb(0x5c6166),
                 accent: rgb(0xf29718),
@@ -108,24 +94,47 @@ impl ThemeName {
                 line: rgb(0xcfd4da),
                 select: Some(rgb(0xe1e8f0)),
             },
-            Self::Terminal => Theme {
-                ink: Color::Reset,
-                accent: Color::Yellow,
-                prompt: Color::Yellow,
-                turn: Color::LightRed,
-                sub: Color::Cyan,
-                read: Color::Blue,
-                write: Color::Green,
-                exec: Color::Magenta,
-                other: Color::DarkGray,
-                ok: Color::Green,
-                err: Color::Red,
-                muted: Color::Gray,
-                faint: Color::DarkGray,
-                line: Color::DarkGray,
-                select: None,
-            },
         }
+    }
+}
+
+/// Does the terminal take 24-bit colour? (`COLORTERM=truecolor` or
+/// `24bit`, which most modern terminals set.)
+pub fn truecolor() -> bool {
+    static TC: OnceLock<bool> = OnceLock::new();
+    *TC.get_or_init(|| {
+        let ct = std::env::var("COLORTERM").unwrap_or_default().to_ascii_lowercase();
+        let term = std::env::var("TERM").unwrap_or_default().to_ascii_lowercase();
+        matches!(ct.as_str(), "truecolor" | "24bit") || term.contains("truecolor") || term.contains("direct")
+    })
+}
+
+/// The nearest colour in the xterm 256-colour palette (its 6×6×6 cube and
+/// 24 greys; the first 16 vary by terminal, so they're skipped).
+pub fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
+    const LEVELS: [i32; 6] = [0, 95, 135, 175, 215, 255];
+    let dist = |a: (i32, i32, i32)| {
+        let (dr, dg, db) = (a.0 - r as i32, a.1 - g as i32, a.2 - b as i32);
+        dr * dr + dg * dg + db * db
+    };
+    let near = |c: u8| {
+        LEVELS
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, l)| (**l - c as i32).abs())
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    };
+    let (ri, gi, bi) = (near(r), near(g), near(b));
+    let cube = (LEVELS[ri], LEVELS[gi], LEVELS[bi]);
+    let cube_idx = 16 + 36 * ri + 6 * gi + bi;
+    let avg = (r as i32 + g as i32 + b as i32) / 3;
+    let gi = ((avg - 8).max(0) / 10).min(23);
+    let grey = 8 + 10 * gi;
+    if dist((grey, grey, grey)) < dist(cube) {
+        232 + gi as u8
+    } else {
+        cube_idx as u8
     }
 }
 
@@ -151,6 +160,31 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// The same palette in 256 colours.
+    pub fn to_256(self) -> Self {
+        let c = |c: Color| match c {
+            Color::Rgb(r, g, b) => Color::Indexed(nearest_256(r, g, b)),
+            other => other,
+        };
+        Self {
+            ink: c(self.ink),
+            accent: c(self.accent),
+            prompt: c(self.prompt),
+            turn: c(self.turn),
+            sub: c(self.sub),
+            read: c(self.read),
+            write: c(self.write),
+            exec: c(self.exec),
+            other: c(self.other),
+            ok: c(self.ok),
+            err: c(self.err),
+            muted: c(self.muted),
+            faint: c(self.faint),
+            line: c(self.line),
+            select: self.select.map(c),
+        }
+    }
+
     pub fn fg(&self, c: Color) -> Style {
         Style::new().fg(c)
     }

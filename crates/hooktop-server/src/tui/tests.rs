@@ -14,7 +14,7 @@ fn key(app: &mut App, code: KeyCode) {
 
 fn demo_app() -> App {
     let g = crate::demo::demo_graph("demo-1");
-    let mut app = App::new(4317, Mode::Embedded, ThemeName::Terminal);
+    let mut app = App::new(4317, Mode::Embedded, ThemeName::Dark);
     app.on_net(Net::Up);
     let summary: SessionSummary = g.summary();
     app.on_net(Net::Msg(Box::new(ServerMsg::Hello {
@@ -131,7 +131,7 @@ fn keys_fold_and_follow_followers() {
 #[test]
 fn deltas_apply_live() {
     let full = crate::demo::demo_graph("demo-1");
-    let mut app = App::new(4317, Mode::Embedded, ThemeName::Terminal);
+    let mut app = App::new(4317, Mode::Embedded, ThemeName::Dark);
     app.on_net(Net::Up);
     app.on_net(Net::Msg(Box::new(ServerMsg::Hello {
         version: "t".into(),
@@ -184,9 +184,16 @@ fn server_messages_deserialize() {
 
 #[test]
 fn themes_parse_and_cycle() {
-    assert_eq!(ThemeName::parse("Ayu Mirage"), Some(ThemeName::Mirage));
+    assert_eq!(ThemeName::parse("Ayu Dark"), Some(ThemeName::Dark));
+    assert_eq!(ThemeName::parse("mirage"), None, "only dark and light");
     assert_eq!(ThemeName::parse("ayu-light"), Some(ThemeName::Light));
-    assert_eq!(ThemeName::Terminal.next(), ThemeName::Dark);
+    assert_eq!(ThemeName::Light.next(), ThemeName::Dark);
+    assert_eq!(ThemeName::Dark.next(), ThemeName::Light);
+    // 256-colour fallback keeps the ayu look: accent yellow, error red.
+    assert_eq!(super::theme::nearest_256(0xe6, 0xb4, 0x50), 179);
+    assert_eq!(super::theme::nearest_256(0x0d, 0x10, 0x17), 232);
+    let t = ThemeName::Dark.theme().to_256();
+    assert!(matches!(t.accent, ratatui::style::Color::Indexed(_)));
     assert_eq!(ui::ellipsize("hello world", 6), "hello…");
 }
 
@@ -278,6 +285,10 @@ fn statistics_tab_ranks_the_run() {
         "Busiest processes",
         "Followers",
         "cargo",
+        "Cost · API prices",
+        "Cost by model",
+        "opus-5-5",
+        "haiku-5-5",
     ] {
         assert!(s.contains(want), "missing {want:?} in\n{s}");
     }
@@ -324,7 +335,7 @@ fn follow_jumps_to_the_working_connection() {
     busy.session_id = "other".into();
     busy.status = hooktop_core::SessionStatus::Running;
     busy.updated_ms = idle.updated_ms - 10;
-    let mut app = App::new(4317, Mode::Embedded, ThemeName::Terminal);
+    let mut app = App::new(4317, Mode::Embedded, ThemeName::Dark);
     app.on_net(Net::Up);
     app.on_net(Net::Msg(Box::new(ServerMsg::Hello {
         version: "t".into(),
@@ -348,4 +359,25 @@ fn follow_jumps_to_the_working_connection() {
     let picked = app.current.clone();
     app.on_net(Net::Msg(Box::new(ServerMsg::Sessions { sessions: vec![busy] })));
     assert_eq!(app.current, picked);
+}
+
+#[test]
+fn costs_show_in_the_timeline() {
+    let mut app = demo_app();
+    let g = app.graph.clone().unwrap();
+    assert!(!g.usage.is_empty(), "the demo records token usage");
+    assert!(
+        g.usage.iter().all(|u| u.task.is_some()),
+        "every call is matched to a task"
+    );
+    let s = render(&mut app, 190, 50);
+    assert!(s.contains("Cost"), "history has a cost column:\n{s}");
+    assert!(
+        s.contains(" for ") && s.contains("tokens"),
+        "header shows the total:\n{s}"
+    );
+    // Details of a prompt break the tokens down.
+    key(&mut app, KeyCode::Char('g'));
+    let s = render(&mut app, 190, 50);
+    assert!(s.contains("cache read") && s.contains("at API prices"), "{s}");
 }

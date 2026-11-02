@@ -7,9 +7,11 @@
 
 pub mod event;
 pub mod graph;
+pub mod pricing;
 pub mod prompt;
 pub mod stats;
 mod summary;
+pub mod usage;
 pub mod view;
 
 pub use event::{Event, EventKind, HookPayload, SAMPLE_HOOK, Sample, normalize};

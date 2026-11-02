@@ -10,6 +10,7 @@ pub mod hub;
 pub mod procs;
 pub mod server;
 pub mod store;
+pub mod transcripts;
 pub mod tui;
 mod ws;
 

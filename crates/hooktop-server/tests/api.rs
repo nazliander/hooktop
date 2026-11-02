@@ -391,3 +391,63 @@ async fn an_unused_server_stops_but_an_open_window_keeps_it_up() {
     probe.abort();
     server.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn token_usage_is_read_from_the_transcript() {
+    // A fake Claude config folder holding a transcript.
+    let dir = std::env::temp_dir().join(format!("hooktop-api-transcript-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("projects")).unwrap();
+    let transcript = dir.join("projects").join("s.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"user","message":{"content":"the prompt text"}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-11-02T13:00:00Z","message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}],"usage":{"input_tokens":1000000,"output_tokens":100000}}}"#, "\n",
+        ),
+    )
+    .unwrap();
+    // SAFETY: no other test in this binary reads CLAUDE_CONFIG_DIR.
+    unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", &dir) };
+
+    let st = state(None);
+    let hub = st.hub.clone();
+    let app = router(st);
+    let tp = transcript.to_str().unwrap();
+    for ev in [
+        json!({"session_id": "u", "hook_event_name": "UserPromptSubmit", "prompt": "go", "transcript_path": tp}),
+        json!({"session_id": "u", "hook_event_name": "PreToolUse", "tool_name": "Read", "tool_use_id": "t1", "tool_input": {}, "transcript_path": tp}),
+        json!({"session_id": "u", "hook_event_name": "PostToolBatch", "transcript_path": tp}),
+        // A transcript outside the config folder is ignored.
+        json!({"session_id": "u", "hook_event_name": "Stop", "transcript_path": "/etc/hosts"}),
+    ] {
+        assert_eq!(app.clone().oneshot(hook(ev)).await.unwrap().status(), StatusCode::OK);
+    }
+    // Reading happens off the request path.
+    let mut usage = Vec::new();
+    for _ in 0..50 {
+        usage = hub.snapshot("u").unwrap().1.usage;
+        if !usage.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(usage.len(), 1);
+    let g = hub.snapshot("u").unwrap().1;
+    let turn = g
+        .tasks
+        .iter()
+        .find(|t| t.header.kind == hooktop_core::TaskKind::Turn)
+        .unwrap()
+        .header
+        .id;
+    assert_eq!(usage[0].task, Some(turn), "matched by tool call");
+    let c = hooktop_core::stats::costs(&g, &hooktop_core::pricing::Pricing::builtin());
+    assert!((c.total - (4.0 + 2.0)).abs() < 1e-9, "1M in at $4 + 100k out at $20");
+    let stored = serde_json::to_string(&g.usage).unwrap();
+    assert!(!stored.contains("prompt text"), "only numbers are kept");
+
+    // Re-reading the same lines changes nothing.
+    assert!(!hub.ingest_usage("u", usage[0].clone()));
+    unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+    std::fs::remove_dir_all(dir).unwrap();
+}

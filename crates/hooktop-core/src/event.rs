@@ -117,6 +117,9 @@ pub enum EventKind {
     /// CPU and memory of the session's Claude Code process tree, recorded
     /// by hooktop itself (see [`SAMPLE_HOOK`]).
     Sample(Sample),
+    /// Tokens one model call used, read from the session transcript by
+    /// hooktop (see [`crate::usage`]).
+    Usage(crate::usage::Usage),
     /// A hook event hooktop stores but does not visualize.
     Other {
         hook_event_name: String,
@@ -216,6 +219,9 @@ pub fn normalize(p: &HookPayload, seq: u64, at_ms: i64) -> Event {
             procs: p.extra.get("procs").and_then(Value::as_u64).unwrap_or(0) as u32,
             top: p.extra.get("top").and_then(Value::as_str).map(str::to_string),
         }),
+        crate::usage::USAGE_HOOK if crate::usage::Usage::from_payload(p).is_some() => {
+            EventKind::Usage(crate::usage::Usage::from_payload(p).unwrap_or_default())
+        }
         other => EventKind::Other {
             hook_event_name: other.to_string(),
         },

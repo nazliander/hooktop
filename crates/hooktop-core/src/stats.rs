@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use crate::graph::{SessionGraph, Status, TaskId, TaskKind};
+use crate::pricing::Pricing;
 use crate::view;
 
 /// One tool call, with how long it took and what the machine did meanwhile.
@@ -30,6 +31,8 @@ pub struct PromptStat {
     pub took_ms: i64,
     pub turns: usize,
     pub tools: usize,
+    /// The prompt and every turn answering it, at API prices.
+    pub cost: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +61,128 @@ pub struct FollowerStat {
     pub status: Status,
     pub took_ms: i64,
     pub tools: usize,
+    pub cost: f64,
+}
+
+/// Tokens and cost for one model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelCost {
+    pub model: String,
+    pub calls: usize,
+    pub tokens: u64,
+    pub output: u64,
+    /// `None` when hooktop has no price for the model.
+    pub cost: Option<f64>,
+}
+
+/// What the session's model calls cost, at API list prices.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Costs {
+    /// Model calls with usage recorded.
+    pub calls: usize,
+    /// Sum over models with a known price.
+    pub total: f64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub by_model: Vec<ModelCost>,
+    /// Priced cost and tokens per task.
+    pub by_task: HashMap<TaskId, f64>,
+    pub tokens_by_task: HashMap<TaskId, u64>,
+    /// Cost of calls that couldn't be matched to a task.
+    pub unattributed: f64,
+}
+
+impl Costs {
+    pub fn has_usage(&self) -> bool {
+        self.calls > 0
+    }
+
+    pub fn tokens(&self) -> u64 {
+        self.input + self.output + self.cache_read + self.cache_write
+    }
+
+    /// Models seen without a price.
+    pub fn unpriced(&self) -> Vec<&str> {
+        self.by_model
+            .iter()
+            .filter(|m| m.cost.is_none())
+            .map(|m| m.model.as_str())
+            .collect()
+    }
+
+    pub fn of(&self, task: TaskId) -> f64 {
+        self.by_task.get(&task).copied().unwrap_or(0.0)
+    }
+
+    pub fn tokens_of(&self, task: TaskId) -> u64 {
+        self.tokens_by_task.get(&task).copied().unwrap_or(0)
+    }
+
+    /// A prompt together with the turns that answered it.
+    pub fn prompt(&self, g: &SessionGraph, prompt: TaskId) -> (f64, u64) {
+        let turns = view::prompt_groups(g)
+            .into_iter()
+            .find(|(p, _)| *p == Some(prompt))
+            .map(|(_, t)| t)
+            .unwrap_or_default();
+        std::iter::once(prompt)
+            .chain(turns)
+            .fold((0.0, 0), |(c, n), t| (c + self.of(t), n + self.tokens_of(t)))
+    }
+
+    /// Everything the main agent did: all but the followers.
+    pub fn boss(&self, g: &SessionGraph) -> f64 {
+        self.unattributed
+            + g.tasks
+                .iter()
+                .filter(|t| t.header.kind != TaskKind::Subagent)
+                .map(|t| self.of(t.header.id))
+                .sum::<f64>()
+    }
+}
+
+/// Price every model call in the session.
+pub fn costs(g: &SessionGraph, pricing: &Pricing) -> Costs {
+    let mut c = Costs::default();
+    let mut models: HashMap<String, ModelCost> = HashMap::new();
+    for u in &g.usage {
+        c.calls += 1;
+        c.input += u.input;
+        c.output += u.output;
+        c.cache_read += u.cache_read;
+        c.cache_write += u.cache_write_5m + u.cache_write_1h;
+        let cost = pricing.cost(u);
+        let m = models.entry(u.model.clone()).or_insert_with(|| ModelCost {
+            model: u.model.clone(),
+            calls: 0,
+            tokens: 0,
+            output: 0,
+            cost: Some(0.0),
+        });
+        m.calls += 1;
+        m.tokens += u.total();
+        m.output += u.output;
+        m.cost = m.cost.zip(cost).map(|(a, b)| a + b);
+        let cost = cost.unwrap_or(0.0);
+        c.total += cost;
+        match u.task {
+            Some(t) => {
+                *c.by_task.entry(t).or_default() += cost;
+                *c.tokens_by_task.entry(t).or_default() += u.total();
+            }
+            None => c.unattributed += cost,
+        }
+    }
+    c.by_model = models.into_values().collect();
+    c.by_model.sort_by(|a, b| {
+        b.cost
+            .unwrap_or(-1.0)
+            .total_cmp(&a.cost.unwrap_or(-1.0))
+            .then(b.tokens.cmp(&a.tokens))
+    });
+    c
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -81,6 +206,7 @@ pub struct Stats {
     pub cpu_hogs: Vec<CallStat>,
     pub processes: Vec<ProcessStat>,
     pub follower_runs: Vec<FollowerStat>,
+    pub costs: Costs,
 }
 
 impl Stats {
@@ -95,7 +221,8 @@ impl Stats {
 
 /// Work out the stats; `now` closes anything still running, `top` caps
 /// each ranking.
-pub fn stats(g: &SessionGraph, now: i64, top: usize) -> Stats {
+pub fn stats(g: &SessionGraph, now: i64, top: usize, pricing: &Pricing) -> Stats {
+    let costs = costs(g, pricing);
     let end_of = |status: Status, start: i64, end: Option<i64>| {
         end.unwrap_or(if status == Status::Running { now } else { start })
     };
@@ -171,6 +298,7 @@ pub fn stats(g: &SessionGraph, now: i64, top: usize) -> Stats {
             took_ms: (end_of(h.status, h.started_ms, end) - h.started_ms).max(0),
             turns: turns.len(),
             tools: turns.iter().map(|t| g.tasks[*t as usize].tools.len()).sum(),
+            cost: costs.prompt(g, pid).0,
         });
     }
     s.longest_prompts.sort_by_key(|p| std::cmp::Reverse(p.took_ms));
@@ -186,6 +314,7 @@ pub fn stats(g: &SessionGraph, now: i64, top: usize) -> Stats {
             status: h.status,
             took_ms: (end_of(h.status, h.started_ms, h.ended_ms) - h.started_ms).max(0),
             tools: t.tools.len(),
+            cost: costs.of(h.id),
         });
     }
     s.followers = s.follower_runs.len();
@@ -242,6 +371,7 @@ pub fn stats(g: &SessionGraph, now: i64, top: usize) -> Stats {
     s.processes
         .sort_by(|a, b| b.peak_cpu.total_cmp(&a.peak_cpu).then(a.name.cmp(&b.name)));
     s.processes.truncate(top);
+    s.costs = costs;
     s
 }
 
@@ -342,7 +472,7 @@ mod tests {
 
     #[test]
     fn ranks_calls_prompts_and_resources() {
-        let s = stats(&graph(), 10_000, 5);
+        let s = stats(&graph(), 10_000, 5, &Pricing::builtin());
         assert_eq!((s.prompts, s.turns, s.calls, s.failed, s.followers), (1, 1, 3, 1, 1));
         assert_eq!(s.wall_ms, 9_000);
         assert_eq!(s.slowest[0].name, "Bash");
@@ -362,5 +492,42 @@ mod tests {
         let read = s.slowest.iter().find(|c| c.name == "Read").unwrap();
         assert_eq!(read.peak_rss, Some(100));
         assert!((s.failure_rate() - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn costs_by_task_model_and_prompt() {
+        use crate::usage::Usage;
+        let mut g = graph();
+        let u = |id: &str, model: &str, task: Option<TaskId>, input: u64, output: u64| {
+            Delta::Usage(Usage {
+                message_id: id.into(),
+                model: model.into(),
+                input,
+                output,
+                task,
+                ..Default::default()
+            })
+        };
+        for d in [
+            u("a", "claude-opus-5-5", Some(1), 1_000_000, 0),  // turn: $4
+            u("b", "claude-haiku-5-5", Some(2), 0, 1_000_000), // follower: $0.50
+            u("c", "claude-opus-5-5", Some(0), 0, 100_000),    // the reply: $2
+            u("d", "claude-mystery-1", Some(1), 10, 10),       // no price
+            u("e", "claude-opus-5-5", None, 250_000, 0),       // unmatched: $1
+        ] {
+            g.apply_delta(&d);
+        }
+        let s = stats(&g, 10_000, 5, &Pricing::builtin());
+        let c = &s.costs;
+        assert_eq!(c.calls, 5);
+        assert!((c.total - 7.5).abs() < 1e-9);
+        assert!((c.of(1) - 4.0).abs() < 1e-9);
+        assert!((c.unattributed - 1.0).abs() < 1e-9);
+        assert!((c.prompt(&g, 0).0 - 6.0).abs() < 1e-9, "prompt + its turn");
+        assert!((c.boss(&g) - 7.0).abs() < 1e-9, "everything but the follower");
+        assert_eq!(c.unpriced(), vec!["claude-mystery-1"]);
+        assert_eq!(c.by_model[0].model, "claude-opus-5-5");
+        assert!((s.follower_runs[0].cost - 0.5).abs() < 1e-9);
+        assert!((s.longest_prompts[0].cost - 6.0).abs() < 1e-9);
     }
 }

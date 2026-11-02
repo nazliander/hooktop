@@ -143,8 +143,8 @@ async fn hook(State(st): State<AppState>, Peer(peer): Peer, body: Bytes) -> Resp
         }
     };
     tracing::debug!(session = %payload.session_id, event = %payload.hook_event_name, "hook");
-    if payload.hook_event_name == hooktop_core::SAMPLE_HOOK {
-        return (StatusCode::BAD_REQUEST, "HooktopSample is recorded by hooktop itself").into_response();
+    if [hooktop_core::SAMPLE_HOOK, hooktop_core::usage::USAGE_HOOK].contains(&payload.hook_event_name.as_str()) {
+        return (StatusCode::BAD_REQUEST, "that event is recorded by hooktop itself").into_response();
     }
     // Find the Claude Code process while its connection is still open, so
     // CPU and RAM can be sampled. Once per session; a few ms on Linux.
@@ -159,7 +159,23 @@ async fn hook(State(st): State<AppState>, Peer(peer): Peer, body: Bytes) -> Resp
         tracing::debug!(session = %payload.session_id, ?pid, "looked up the hook sender");
         st.hub.procs().record(&payload.session_id, pid);
     }
+    let transcripts = crate::transcripts::paths_of(&payload);
+    let (session, hook) = (payload.session_id.clone(), payload.hook_event_name.clone());
     st.hub.ingest(payload, now_ms(), true);
+    // Token usage lives in Claude Code's transcript: read what's new, off
+    // the request path.
+    if !transcripts.is_empty() {
+        let hub = st.hub.clone();
+        tokio::task::spawn_blocking(move || {
+            for p in transcripts.iter().filter_map(|p| crate::transcripts::allowed(p)) {
+                if hub.transcripts().due(&p, &hook) {
+                    for u in hub.transcripts().read_new(&p) {
+                        hub.ingest_usage(&session, u);
+                    }
+                }
+            }
+        });
+    }
     // `{}` is a valid hook response that changes nothing: hooktop only observes.
     Json(json!({})).into_response()
 }

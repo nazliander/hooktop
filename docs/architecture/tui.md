@@ -9,7 +9,7 @@ The TUI lives in `hooktop-server/src/tui/` and is built on ratatui with the cros
 | `app.rs` | All state and key handling, with no terminal I/O, so it's unit-tested directly |
 | `ui.rs` | Drawing: title bar, connections, the three tabs, details, help |
 | `dag.rs` | Graph view layout, drawing and navigation |
-| `theme.rs` | Ayu Dark, Mirage, Light and a plain ANSI theme |
+| `theme.rs` | Ayu Dark and Ayu Light, with a 256-colour fallback |
 
 ## Attach or embed
 
@@ -73,7 +73,7 @@ Drawn from `hooktop_core::stats::stats(g, now, 8)`: tiles (six on wide terminals
 
 ## Themes
 
-Colours come from the official ayu palette. The background is never painted, so the terminal's own shows through. Ayu Dark is the default when `COLORTERM` is `truecolor` or `24bit`; otherwise the `terminal` theme uses named ANSI colours, and the selection uses reverse video.
+Two themes, Ayu Dark and Ayu Light, from the official ayu palette; `t` switches between them. The background is never painted, so the terminal's own shows through. Ayu Light is the default when the terminal reports a light background (`COLORFGBG`), Ayu Dark otherwise; `--theme` or `HOOKTOP_THEME` chooses. Terminals without 24-bit colour (no `COLORTERM=truecolor`) get each ayu colour as its nearest match in the standard 256-colour palette, so the look carries over.
 
 ## Tests
 

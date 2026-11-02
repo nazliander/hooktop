@@ -69,6 +69,13 @@ pub async fn run(cfg: TuiConfig) -> Result<()> {
         ));
     }
 
+    // Prices: the built-in table, plus any in <data dir>/hooktop/prices.json.
+    let (pricing, note) = load_pricing();
+    app.pricing = pricing;
+    if let Some(note) = note {
+        app.say(note);
+    }
+
     // Hooks without the token would be refused, and sessions would silently
     // stop showing up: say so on screen.
     let url = crate::hooks::hook_url("127.0.0.1", cfg.port);
@@ -149,6 +156,36 @@ async fn event_loop(
         if app.quit {
             return Ok(());
         }
+    }
+}
+
+/// Where price overrides live: next to the event store.
+pub fn prices_path() -> PathBuf {
+    crate::auth::token_path().with_file_name("prices.json")
+}
+
+/// The built-in prices, plus overrides from [`prices_path`] if it exists.
+/// Returns a message for the footer when the file has problems.
+fn load_pricing() -> (hooktop_core::pricing::Pricing, Option<String>) {
+    let builtin = hooktop_core::pricing::Pricing::builtin();
+    let path = prices_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (builtin, None);
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(json) => {
+            let (p, bad) = builtin.with_overrides(&json);
+            let note =
+                (!bad.is_empty()).then(|| format!("{}: couldn't read prices for {}", path.display(), bad.join(", ")));
+            (p, note)
+        }
+        Err(e) => (
+            builtin,
+            Some(format!(
+                "{} isn't valid JSON ({e}); using built-in prices",
+                path.display()
+            )),
+        ),
     }
 }
 

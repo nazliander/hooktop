@@ -25,6 +25,7 @@ Existing hooks are left alone, and the original file is backed up first. `hookto
 | `SessionEnd` | `SessionEnded { reason }` |
 | `Notification` | `Notification { message }` |
 | `HooktopSample` (hooktop's own) | `Sample(Sample)` |
+| `HooktopUsage` (hooktop's own) | `Usage(Usage)` |
 | anything else | `Other` (stored, not drawn) |
 
 `SubagentStart` and `SubagentStop` fire in the parent's context, so their `agent_id` names the child and is carried in the kind rather than as the event's source agent.
@@ -98,6 +99,7 @@ sequenceDiagram
 | `tool { task_id, tool }` | a tool call was created or changed |
 | `edge { from, to }` | a new edge |
 | `sample { at_ms, cpu, rss, procs, top }` | a CPU/RAM reading |
+| `usage { message_id, model, tokens…, task }` | one model call's tokens, attributed to a task; upserted by `message_id` ([details](costs.md)) |
 
 All of them are idempotent, so a client that receives one twice ends up in the same state. Task ids are dense and assigned in order, so `tasks[id]` indexing stays valid on both sides.
 

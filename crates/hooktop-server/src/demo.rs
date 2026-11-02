@@ -175,7 +175,10 @@ pub async fn run_demo(hub: Arc<Hub>, speed: f64, looped: bool) {
                     emit_sample(&hub, &script.session_id, now_ms(), tick);
                 }
             }
-            hub.ingest(step.payload, now_ms(), false);
+            let (hook, agent) = (step.payload.hook_event_name.clone(), step.payload.agent_id.clone());
+            let at = now_ms();
+            hub.ingest(step.payload, at, false);
+            emit_usage(&hub, &script.session_id, &hook, agent.as_deref(), at);
         }
         if !looped {
             return;
@@ -245,6 +248,85 @@ fn synthetic_sample(g: &hooktop_core::SessionGraph, at_ms: i64, tick: u32) -> ho
     }
 }
 
+/// Made-up but plausible token usage: Opus for the main agent, Haiku for
+/// the Explore follower, with the cache growing turn by turn the way real
+/// sessions do. Real sessions get theirs from Claude Code's transcript.
+fn emit_usage(hub: &Hub, session_id: &str, hook: &str, agent: Option<&str>, at_ms: i64) {
+    let Some((_, g)) = hub.snapshot(session_id) else { return };
+    let usage = |id: String, model: &str, task: &hooktop_core::Task, input: u64, read: u64, out: u64| {
+        hooktop_core::usage::Usage {
+            message_id: id,
+            model: model.into(),
+            at_ms,
+            input,
+            output: out,
+            cache_read: read,
+            cache_write_5m: 1_200 + 400 * task.tools.len() as u64,
+            tool_use_ids: task.tools.iter().map(|c| c.id.clone()).collect(),
+            ..Default::default()
+        }
+    };
+    let turns = g
+        .tasks
+        .iter()
+        .filter(|t| t.header.kind == hooktop_core::TaskKind::Turn)
+        .count() as u64;
+    let u = match hook {
+        "PostToolBatch" => g
+            .tasks
+            .iter()
+            .rev()
+            .find(|t| t.header.kind == hooktop_core::TaskKind::Turn)
+            .map(|t| {
+                usage(
+                    format!("demo-turn-{}", t.header.id),
+                    "claude-opus-5-5",
+                    t,
+                    8,
+                    24_000 + 7_000 * turns,
+                    160 + 240 * t.tools.len() as u64,
+                )
+            }),
+        "SubagentStop" => g
+            .tasks
+            .iter()
+            .find(|t| t.header.kind == hooktop_core::TaskKind::Subagent && t.header.agent_id.as_deref() == agent)
+            .map(|t| {
+                usage(
+                    format!("demo-agent-{}", t.header.id),
+                    "claude-haiku-5-5",
+                    t,
+                    3_100,
+                    18_000,
+                    900,
+                )
+            }),
+        "Stop" => {
+            let prompt = g
+                .tasks
+                .iter()
+                .rev()
+                .find(|t| t.header.kind == hooktop_core::TaskKind::Prompt);
+            prompt.map(|p| {
+                let mut u = usage(
+                    format!("demo-reply-{}", p.header.id),
+                    "claude-opus-5-5",
+                    p,
+                    6,
+                    26_000 + 7_000 * turns,
+                    420,
+                );
+                u.tool_use_ids.clear();
+                u
+            })
+        }
+        _ => None,
+    };
+    if let Some(u) = u {
+        hub.ingest(u.to_payload(session_id), at_ms, false);
+    }
+}
+
 fn emit_sample(hub: &Hub, session_id: &str, at_ms: i64, tick: u32) {
     if let Some((_, g)) = hub.snapshot(session_id) {
         hub.ingest(synthetic_sample(&g, at_ms, tick).to_payload(session_id), at_ms, false);
@@ -275,7 +357,9 @@ pub fn demo_graph(session_id: &str) -> hooktop_core::SessionGraph {
             emit_sample(&hub, session_id, at, tick);
         }
         at += left as i64;
+        let (hook, agent) = (step.payload.hook_event_name.clone(), step.payload.agent_id.clone());
         hub.ingest(step.payload, at, false);
+        emit_usage(&hub, session_id, &hook, agent.as_deref(), at);
     }
     hub.snapshot(session_id).map(|(_, g)| g).expect("demo session exists")
 }

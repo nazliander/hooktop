@@ -111,6 +111,8 @@ pub struct App {
     pub confirm: Option<Confirm>,
     /// A standing problem to show until it's fixed (outdated hooks).
     pub hook_warning: Option<String>,
+    /// Prices for turning token usage into money.
+    pub pricing: hooktop_core::pricing::Pricing,
     flash: Option<(String, Instant)>,
 
     pub quit: bool,
@@ -151,6 +153,7 @@ impl App {
             help: false,
             confirm: None,
             hook_warning: None,
+            pricing: hooktop_core::pricing::Pricing::builtin(),
             flash: None,
             quit: false,
             outbox: Vec::new(),

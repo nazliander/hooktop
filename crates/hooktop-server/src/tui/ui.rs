@@ -18,6 +18,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::app::{App, Confirm, Focus, Mode, View};
 use super::dag;
 use super::theme::Theme;
+use hooktop_core::pricing::{format_tokens, format_usd};
 
 pub const BOSS_ICON: &str = "🦊";
 pub const FOLLOWER_ICON: &str = "♞";
@@ -570,7 +571,8 @@ fn tile(f: &mut Frame, t: &Theme, area: Rect, title: &str, value: String, color:
 
 fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
     let Some(g) = &app.graph else { return };
-    let st = hooktop_core::stats::stats(g, now, 8);
+    let st = hooktop_core::stats::stats(g, now, 8, &app.pricing);
+    let costs = &st.costs;
 
     let tall = area.height >= 34;
     let [tiles, mix_row, calls_row, res_row] = Layout::vertical([
@@ -608,10 +610,18 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
             },
         ),
         (
-            "Followers",
-            st.followers.to_string(),
-            t.sub,
-            format!("{FOLLOWER_ICON} subagents sent"),
+            "Cost · API prices",
+            if costs.has_usage() {
+                format_usd(costs.total)
+            } else {
+                "—".into()
+            },
+            t.write,
+            if costs.has_usage() {
+                format!("{} tokens", format_tokens(costs.tokens()))
+            } else {
+                "no usage read yet".into()
+            },
         ),
     ];
     if n_tiles == 6 {
@@ -638,8 +648,31 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         tile(f, t, *cell, title, value, color, sub);
     }
 
-    // Tool mix and time per tool
-    let [mix_a, time_a] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(mix_row);
+    // Tool mix, time per tool, cost by model
+    let [mix_a, time_a, cost_a] =
+        Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)]).areas(mix_row);
+    let cost_rows: Vec<Bar> = costs
+        .by_model
+        .iter()
+        .map(|m| Bar {
+            label: hooktop_core::pricing::model_key(&m.model),
+            value: m.cost.unwrap_or(0.0),
+            text: match m.cost {
+                Some(c) => format!("{} · {}", format_usd(c), format_tokens(m.tokens)),
+                None => format!("no price · {}", format_tokens(m.tokens)),
+            },
+            color: t.write,
+            extra: None,
+        })
+        .collect();
+    bars(
+        f,
+        t,
+        cost_a,
+        "Cost by model · API prices",
+        cost_rows,
+        "No token usage yet: hooktop reads it from Claude Code's transcript.",
+    );
     let mix_rows: Vec<Bar> = st
         .mix
         .iter()
@@ -720,6 +753,17 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
                 ])),
                 Cell::from(Span::styled(format!("{} tools", p.tools), t.muted())),
                 Cell::from(Line::styled(view::duration(p.took_ms), Style::new().fg(t.ink)).alignment(Alignment::Right)),
+                Cell::from(
+                    Line::styled(
+                        if costs.has_usage() {
+                            format_usd(p.cost)
+                        } else {
+                            String::new()
+                        },
+                        Style::new().fg(t.write),
+                    )
+                    .alignment(Alignment::Right),
+                ),
             ])
         })
         .collect();
@@ -727,9 +771,14 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         f,
         t,
         prompt_a,
-        "Longest prompts",
+        "Longest prompts · cost",
         rows,
-        vec![Constraint::Fill(1), Constraint::Length(9), Constraint::Length(8)],
+        vec![
+            Constraint::Fill(1),
+            Constraint::Length(9),
+            Constraint::Length(8),
+            Constraint::Length(7),
+        ],
         "No prompts yet.",
     );
 
@@ -795,12 +844,22 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         .map(|r| Bar {
             label: format!("{FOLLOWER_ICON} {}", view::agent_name(r.agent_type.as_deref())),
             value: r.took_ms as f64,
-            text: format!("{} · {} tools", view::duration(r.took_ms), r.tools),
+            text: if costs.has_usage() {
+                format!(
+                    "{} · {} tools · {}",
+                    view::duration(r.took_ms),
+                    r.tools,
+                    format_usd(r.cost)
+                )
+            } else {
+                format!("{} · {} tools", view::duration(r.took_ms), r.tools)
+            },
             color: t.sub,
             extra: None,
         })
         .collect();
-    bars(f, t, foll_a, "Followers", foll_rows, "Watcher worked alone.");
+    let foll_title = format!("Followers · {}", st.followers);
+    bars(f, t, foll_a, &foll_title, foll_rows, "Watcher worked alone.");
 }
 
 fn table(f: &mut Frame, t: &Theme, area: Rect, title: &str, rows: Vec<TRow>, widths: Vec<Constraint>, empty: &str) {
@@ -917,6 +976,18 @@ fn header(f: &mut Frame, app: &App, t: &Theme, area: Rect, members: &[Member], n
     if failed > 0 {
         stats.push(Span::styled(format!(" ({failed} failed)"), Style::new().fg(t.err)));
     }
+    let costs = hooktop_core::stats::costs(g, &app.pricing);
+    if costs.has_usage() {
+        stats.push(Span::styled(" · ", t.faint()));
+        stats.push(Span::styled(
+            format_usd(costs.total),
+            Style::new().fg(t.write).add_modifier(Modifier::BOLD),
+        ));
+        stats.push(Span::styled(
+            format!(" for {} tokens", format_tokens(costs.tokens())),
+            t.muted(),
+        ));
+    }
     let followers = members.len().saturating_sub(1);
     stats.push(Span::styled(" · ", t.faint()));
     stats.push(Span::styled(
@@ -934,6 +1005,10 @@ fn party(f: &mut Frame, app: &mut App, t: &Theme, area: Rect, members: &[Member]
     let focused = app.focus == Focus::Party;
     let block = panel(t, "Party", focused);
     let width = area.width.saturating_sub(4) as usize;
+    let costs = app
+        .graph
+        .as_ref()
+        .map(|g| (hooktop_core::stats::costs(g, &app.pricing), g));
     let items: Vec<ListItem> = members
         .iter()
         .map(|m| {
@@ -965,6 +1040,16 @@ fn party(f: &mut Frame, app: &mut App, t: &Theme, area: Rect, members: &[Member]
                 format!(" · {}", view::duration(m.ended_ms.unwrap_or(now) - m.started_ms)),
                 t.muted(),
             ));
+            if let Some((c, g)) = &costs
+                && c.has_usage()
+            {
+                let v = match m.key {
+                    None => c.boss(g),
+                    Some(k) => c.of(k),
+                };
+                spans.push(Span::styled(" · ", t.muted()));
+                spans.push(Span::styled(format_usd(v), Style::new().fg(t.write)));
+            }
             let used: usize = spans.iter().map(|s| s.width()).sum();
             if width > used + 4 {
                 spans.push(Span::styled(
@@ -1006,9 +1091,12 @@ fn history(f: &mut Frame, app: &mut App, t: &Theme, area: Rect, now: i64) {
     }
 
     let wide = area.width >= 84;
-    // Fixed columns: status 10, tools 5, started 9, took 8, plus spacing
-    // and the cursor; give the timeline a good share of what's left.
-    let spare = area.width.saturating_sub(2 + 1 + 10 + 5 + 9 + 8 + 5);
+    let costs = hooktop_core::stats::costs(g, &app.pricing);
+    let show_cost = costs.has_usage();
+    let cost_w: u16 = if show_cost { 8 } else { 0 };
+    // Fixed columns: status 10, tools 5, started 9, took 8, cost, plus
+    // spacing and the cursor; give the timeline a good share of the rest.
+    let spare = area.width.saturating_sub(2 + 1 + 10 + 5 + 9 + 8 + 5 + cost_w);
     let bar_w = (spare * 9 / 20).clamp(16, 90);
     let span_start = g.started_ms;
     let span_end = if g.status == SessionStatus::Ended {
@@ -1029,6 +1117,17 @@ fn history(f: &mut Frame, app: &mut App, t: &Theme, area: Rect, now: i64) {
                 Cell::from(Span::styled(tool_count(g, r), t.muted())),
                 Cell::from(Line::styled(view::duration(end - r.started_ms), t.muted()).alignment(Alignment::Right)),
             ];
+            if show_cost {
+                let v = match r.kind {
+                    RowKind::Tool => None,
+                    RowKind::Turn => Some(costs.of(r.task)),
+                    _ => Some(costs.prompt(g, r.task).0),
+                };
+                let text = v.filter(|v| *v > 0.0).map(format_usd).unwrap_or_default();
+                cells.push(Cell::from(
+                    Line::styled(text, Style::new().fg(t.write)).alignment(Alignment::Right),
+                ));
+            }
             if wide {
                 cells.insert(
                     3,
@@ -1050,6 +1149,10 @@ fn history(f: &mut Frame, app: &mut App, t: &Theme, area: Rect, now: i64) {
         Constraint::Length(8),
     ];
     let mut head = vec!["Name", "Status", "Tools", "Took"];
+    if show_cost {
+        widths.push(Constraint::Length(cost_w - 1));
+        head.push("Cost");
+    }
     if wide {
         widths.insert(3, Constraint::Length(9));
         head.insert(3, "Started");
@@ -1060,7 +1163,7 @@ fn history(f: &mut Frame, app: &mut App, t: &Theme, area: Rect, now: i64) {
         .into_iter()
         .map(|h| {
             let line = Line::styled(h, t.faint());
-            Cell::from(if h == "Took" {
+            Cell::from(if h == "Took" || h == "Cost" {
                 line.alignment(Alignment::Right)
             } else {
                 line
@@ -1198,7 +1301,7 @@ fn details(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
     let block = panel(t, "Details", false);
     let Some(g) = &app.graph else { return };
     let lines = match app.selected_row() {
-        Some(r) => detail_lines(t, g, &r, now),
+        Some(r) => detail_lines(t, g, &r, now, &hooktop_core::stats::costs(g, &app.pricing)),
         None => vec![Line::styled(
             "Select a row to see what went in and what came out.",
             t.muted(),
@@ -1220,7 +1323,13 @@ fn details(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
     );
 }
 
-fn detail_lines<'a>(t: &Theme, g: &'a SessionGraph, r: &Row, now: i64) -> Vec<Line<'a>> {
+fn detail_lines<'a>(
+    t: &Theme,
+    g: &'a SessionGraph,
+    r: &Row,
+    now: i64,
+    costs: &hooktop_core::stats::Costs,
+) -> Vec<Line<'a>> {
     let task = &g.tasks[r.task as usize];
     let mut out = Vec::new();
     let end = r
@@ -1294,6 +1403,50 @@ fn detail_lines<'a>(t: &Theme, g: &'a SessionGraph, r: &Row, now: i64) -> Vec<Li
                     String::new()
                 };
                 fact(&mut out, "Tool calls", Span::raw(format!("{}{failed}", h.tool_count)));
+            }
+            // Tokens and cost: a turn's own model calls, or a prompt and
+            // every turn that answered it.
+            let tasks: Vec<hooktop_core::TaskId> = match r.kind {
+                RowKind::Turn => vec![r.task],
+                _ => std::iter::once(r.task)
+                    .chain(
+                        view::prompt_groups(g)
+                            .into_iter()
+                            .find(|(p, _)| *p == Some(r.task))
+                            .map(|(_, turns)| turns)
+                            .unwrap_or_default(),
+                    )
+                    .collect(),
+            };
+            let mine: Vec<_> = g
+                .usage
+                .iter()
+                .filter(|u| u.task.is_some_and(|x| tasks.contains(&x)))
+                .collect();
+            if !mine.is_empty() {
+                let sum = |f: fn(&hooktop_core::usage::Usage) -> u64| mine.iter().map(|u| f(u)).sum::<u64>();
+                let (input, output) = (sum(|u| u.input), sum(|u| u.output));
+                let (read, write) = (sum(|u| u.cache_read), sum(|u| u.cache_write_5m + u.cache_write_1h));
+                fact(
+                    &mut out,
+                    "Tokens",
+                    Span::raw(format!(
+                        "{} in · {} out · {} cache read · {} cache write",
+                        format_tokens(input),
+                        format_tokens(output),
+                        format_tokens(read),
+                        format_tokens(write)
+                    )),
+                );
+                let cost: f64 = tasks.iter().map(|x| costs.of(*x)).sum();
+                fact(
+                    &mut out,
+                    "Cost",
+                    Span::styled(
+                        format!("{} at API prices · {} model calls", format_usd(cost), mine.len()),
+                        Style::new().fg(t.write),
+                    ),
+                );
             }
             if let Some(s) = &h.summary {
                 section(
@@ -1401,7 +1554,7 @@ fn help(f: &mut Frame, t: &Theme) {
         ("d  or  ]", "show or hide details"),
         ("[", "show or hide connections"),
         ("PgUp / PgDn", "scroll details"),
-        ("t", "theme: Ayu Dark, Mirage, Light, Terminal"),
+        ("t", "theme: Ayu Dark or Ayu Light"),
         ("q", "quit"),
     ];
     let mut lines = vec![

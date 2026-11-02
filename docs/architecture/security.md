@@ -86,6 +86,10 @@ sequenceDiagram
 
 While the server is down, Claude Code's hooks can't connect and those events aren't recorded. Claude keeps working; open `hooktop` again to resume recording.
 
+## Reading Claude Code's transcripts
+
+To count tokens, hooktop reads the transcript files that hooks name in `transcript_path` and `agent_transcript_path`. It only opens `.jsonl` files inside Claude Code's config folder (`~/.claude`, or `$CLAUDE_CONFIG_DIR`), after resolving `..` and symlinks, so a hook can't make hooktop read any other file. From each assistant message it keeps numbers and ids (model, token counts, tool call ids), never the text. See [costs.md](costs.md).
+
 ## Data at rest
 
 | File | Mode | Holds |
