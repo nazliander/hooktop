@@ -396,3 +396,51 @@ fn costs_show_in_the_timeline() {
     let s = render(&mut app, 190, 50);
     assert!(s.contains("cache read") && s.contains("at API prices"), "{s}");
 }
+
+#[test]
+fn statistics_rows_open_their_details_and_jump_to_the_timeline() {
+    use super::drill::Panel;
+    let mut app = demo_app();
+    app.focus = super::app::Focus::History;
+    key(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.stats_panel, Panel::Tools);
+    // The first tool row: every Read, slowest first.
+    key(&mut app, KeyCode::Enter);
+    assert!(app.drill_open);
+    let s = render(&mut app, 160, 44);
+    assert!(s.contains("Read · every call"), "{s}");
+    assert!(s.contains("Calls, slowest first"), "{s}");
+    // Enter on a call shows it in the Timeline.
+    key(&mut app, KeyCode::Enter);
+    assert!(!app.drill_open);
+    assert_eq!(app.view, super::app::View::Timeline);
+    let row = app.selected_row().expect("a row is selected");
+    let g = app.graph.as_ref().unwrap();
+    assert_eq!(g.tasks[row.task as usize].tools[row.tool.unwrap()].name, "Read");
+
+    // Tab moves to the next panel: where the time went, starting at Thinking.
+    key(&mut app, KeyCode::Char('s'));
+    key(&mut app, KeyCode::Tab);
+    assert_eq!(app.stats_panel, Panel::Time);
+    key(&mut app, KeyCode::Enter);
+    let s = render(&mut app, 160, 44);
+    assert!(s.contains("Longest stretches"), "{s}");
+    assert!(s.contains("never what it thought"), "{s}");
+    key(&mut app, KeyCode::Esc);
+    assert!(!app.drill_open);
+    assert_eq!(app.view, super::app::View::Stats);
+}
+
+#[test]
+fn the_top_bar_keeps_to_the_tabs_and_the_link() {
+    let mut app = demo_app();
+    let s = render(&mut app, 160, 44);
+    let top = s.lines().next().unwrap();
+    assert!(top.contains("Timeline") && top.contains("● live"), "{top}");
+    for gone in ["connection", "embedded", "following", "vtest"] {
+        assert!(!top.contains(gone), "{gone:?} in {top}");
+    }
+    key(&mut app, KeyCode::Char('?'));
+    let s = render(&mut app, 160, 44);
+    assert!(s.contains("the server on :4317"), "{s}");
+}

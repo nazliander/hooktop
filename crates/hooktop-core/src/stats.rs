@@ -239,6 +239,13 @@ pub struct Stats {
     pub tool_ms: i64,
     /// Where the wall time went.
     pub time: TimeSplit,
+    /// The longest stretches of thinking (Claude working, no tool running)
+    /// and of waiting for you, longest first.
+    pub thinking: Vec<Stretch>,
+    pub waiting: Vec<Stretch>,
+    /// Every tool call, in the order they started (the rankings are drawn
+    /// from these).
+    pub all_calls: Vec<CallStat>,
     /// Prompts that matched an automated prefix: not counted in `prompts`
     /// or `longest_prompts`.
     pub automated_prompts: usize,
@@ -267,6 +274,29 @@ pub struct TimeSplit {
     pub waiting_ms: i64,
 }
 
+/// A stretch of time in a session, with what was around it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stretch {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    /// For thinking, the turn or follower that was working; for waiting,
+    /// the prompt you sent next.
+    pub task: Option<TaskId>,
+    /// The tool call (or, for waiting, the prompt) just before and after.
+    pub before: Option<(TaskId, Option<usize>)>,
+    pub after: Option<(TaskId, Option<usize>)>,
+    /// Model calls that finished inside the stretch, and what they cost.
+    pub model_calls: usize,
+    pub tokens: u64,
+    pub cost: f64,
+}
+
+impl Stretch {
+    pub fn ms(&self) -> i64 {
+        self.end_ms - self.start_ms
+    }
+}
+
 /// Options for [`stats_with`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Options<'a> {
@@ -281,22 +311,42 @@ pub fn is_automated(title: &str, prefixes: &[String]) -> bool {
     prefixes.iter().any(|p| !p.is_empty() && t.starts_with(p.as_str()))
 }
 
-/// Total length of the union of `spans`.
-fn union_ms(mut spans: Vec<(i64, i64)>) -> i64 {
+/// `spans` merged into sorted, non-overlapping spans.
+fn merge(mut spans: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
     spans.retain(|(a, b)| b > a);
     spans.sort_unstable();
-    let (mut total, mut cur): (i64, Option<(i64, i64)>) = (0, None);
+    let mut out: Vec<(i64, i64)> = Vec::new();
     for (a, b) in spans {
-        match cur {
-            Some((ca, cb)) if a <= cb => cur = Some((ca, cb.max(b))),
-            Some((ca, cb)) => {
-                total += cb - ca;
-                cur = Some((a, b));
-            }
-            None => cur = Some((a, b)),
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
         }
     }
-    total + cur.map_or(0, |(a, b)| b - a)
+    out
+}
+
+/// Total length of the union of `spans`.
+#[cfg(test)]
+fn union_ms(spans: Vec<(i64, i64)>) -> i64 {
+    merge(spans).iter().map(|(a, b)| b - a).sum()
+}
+
+/// The parts of merged spans `a` that merged spans `b` don't cover.
+fn subtract(a: &[(i64, i64)], b: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut out = Vec::new();
+    for &(start, e) in a {
+        let mut s = start;
+        for &(bs, be) in b.iter().filter(|(bs, be)| *be > start && *bs < e) {
+            if bs > s {
+                out.push((s, bs));
+            }
+            s = s.max(be);
+        }
+        if e > s {
+            out.push((s, e));
+        }
+    }
+    out
 }
 
 /// Is this the call that starts a follower? Its time is the follower's
@@ -491,21 +541,103 @@ pub fn stats_with(g: &SessionGraph, now: i64, top: usize, pricing: &Pricing, opt
         active.push((h.started_ms, end_of(h.status, h.started_ms, h.ended_ms)));
     }
     let clip = |(a, b): (i64, i64)| (a.max(g.started_ms), b.min(end));
-    let working = union_ms(active.into_iter().map(clip).collect());
+    let working_spans = merge(active.into_iter().map(clip).collect());
+    let working: i64 = working_spans.iter().map(|(a, b)| b - a).sum();
     // A follower's run isn't a tool running: its own calls count, and the
     // rest of it is thinking.
-    let tool_spans = spans
-        .iter()
-        .zip(&calls)
-        .filter(|(_, c)| !spawns_follower(&c.name))
-        .map(|(sp, _)| clip(*sp))
-        .collect();
-    let tools = union_ms(tool_spans).min(working);
+    let tool_spans = merge(
+        spans
+            .iter()
+            .zip(&calls)
+            .filter(|(_, c)| !spawns_follower(&c.name))
+            .map(|(sp, _)| clip(*sp))
+            .collect(),
+    );
+    let tools: i64 = tool_spans.iter().map(|(a, b)| b - a).sum::<i64>().min(working);
     s.time = TimeSplit {
         thinking_ms: working - tools,
         tools_ms: tools,
         waiting_ms: (s.wall_ms - working).max(0),
     };
+
+    // The stretches behind those numbers.
+    let positions: Vec<(TaskId, usize)> = g
+        .tasks
+        .iter()
+        .flat_map(|t| (0..t.tools.len()).map(move |i| (t.header.id, i)))
+        .collect();
+    let model_calls_in = |a: i64, b: i64| {
+        let in_it: Vec<_> = g.usage.iter().filter(|u| u.at_ms >= a && u.at_ms <= b).collect();
+        (
+            in_it.len(),
+            in_it.iter().map(|u| u.total()).sum::<u64>(),
+            in_it.iter().filter_map(|u| pricing.cost(u)).sum::<f64>(),
+        )
+    };
+    let real = |i: &usize| !spawns_follower(&calls[*i].name);
+    // Which agent a task belongs to: a follower's own id, or `None` for Watcher.
+    let agent_of = |t: TaskId| (g.tasks[t as usize].header.kind == TaskKind::Subagent).then_some(t);
+    for (a, b) in subtract(&working_spans, &tool_spans) {
+        let mid = a + (b - a) / 2;
+        let task = g
+            .tasks
+            .iter()
+            .filter(|t| matches!(t.header.kind, TaskKind::Turn | TaskKind::Subagent))
+            .filter(|t| {
+                let h = &t.header;
+                h.started_ms <= mid && end_of(h.status, h.started_ms, h.ended_ms) >= mid
+            })
+            .max_by_key(|t| t.header.started_ms)
+            .map(|t| t.header.id);
+        // The same agent's last call before it and first call after it.
+        let agent = task.and_then(agent_of);
+        let mine = |i: &usize| real(i) && agent_of(positions[*i].0) == agent;
+        let before = (0..spans.len())
+            .filter(mine)
+            .filter(|i| spans[*i].1 <= a)
+            .max_by_key(|i| spans[*i].1)
+            .map(|i| (positions[i].0, Some(positions[i].1)));
+        let after = (0..spans.len())
+            .filter(mine)
+            .filter(|i| spans[*i].0 >= b)
+            .min_by_key(|i| spans[*i].0)
+            .map(|i| (positions[i].0, Some(positions[i].1)));
+        let (model_calls, tokens, cost) = model_calls_in(a, b);
+        s.thinking.push(Stretch {
+            start_ms: a,
+            end_ms: b,
+            task,
+            before,
+            after,
+            model_calls,
+            tokens,
+            cost,
+        });
+    }
+    let prompts: Vec<&crate::graph::Task> = g.tasks.iter().filter(|t| t.header.kind == TaskKind::Prompt).collect();
+    for (a, b) in subtract(&[(g.started_ms, end)], &working_spans) {
+        let before = prompts
+            .iter()
+            .rev()
+            .find(|t| t.header.started_ms < a)
+            .map(|t| (t.header.id, None));
+        let next = prompts.iter().find(|t| t.header.started_ms >= b).map(|t| t.header.id);
+        s.waiting.push(Stretch {
+            start_ms: a,
+            end_ms: b,
+            task: next,
+            before,
+            after: next.map(|id| (id, None)),
+            model_calls: 0,
+            tokens: 0,
+            cost: 0.0,
+        });
+    }
+    for list in [&mut s.thinking, &mut s.waiting] {
+        list.sort_by_key(|x| std::cmp::Reverse(x.ms()));
+        list.truncate(top * 2);
+    }
+    s.all_calls = calls.clone();
 
     // Machine-wide numbers from the samples.
     if let Some(peak) = g.samples.iter().max_by(|a, b| a.cpu.total_cmp(&b.cpu)) {
@@ -685,6 +817,15 @@ mod tests {
         assert_eq!(s.time.waiting_ms, 0, "the prompt spans the whole session");
         assert_eq!(s.time.thinking_ms + s.time.tools_ms + s.time.waiting_ms, s.wall_ms);
         assert_eq!(union_ms(vec![(0, 10), (5, 20), (30, 40), (35, 36)]), 30);
+        assert_eq!(subtract(&[(0, 100)], &[(10, 20), (50, 120)]), vec![(0, 10), (20, 50)]);
+        // The longest thinking stretch: after the Bash call, until the end.
+        let t = &s.thinking[0];
+        assert_eq!((t.start_ms, t.end_ms), (4_000, 9_000));
+        assert_eq!(t.before, Some((1, Some(1))));
+        assert_eq!(t.after, None);
+        assert_eq!(s.thinking.iter().map(Stretch::ms).sum::<i64>(), s.time.thinking_ms);
+        assert!(s.waiting.is_empty());
+        assert_eq!(s.all_calls.len(), 3);
     }
 
     #[test]

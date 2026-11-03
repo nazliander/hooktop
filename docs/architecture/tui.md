@@ -77,6 +77,21 @@ Drawn from `hooktop_core::stats::stats_with(g, now, 8, pricing, options)`, where
 - **Rankings** (slowest calls, RAM eaters, CPU hogs) group calls with the same tool and target into one row with a `×N` count, showing the biggest. The slowest list leaves out `Agent`/`Task` calls: their time is the Follower's whole run, shown under Followers. RAM and CPU rows carry the `≈` shared and `↳` borrowed marks described in [resources.md](resources.md).
 - Bar lists use eighth-block precision; the rankings are tables.
 
+### Drilling in
+
+`Tab` / `←→` move between panels (`drill::Panel`, in reading order), `↑↓` between rows. `Enter` opens a `drill::Drill` over the tab: facts, a note when the numbers need explaining, and a list of items. `Enter` on an item calls `App::jump_to`, which opens the item's prompt and turn (or switches to its Follower), selects its row in the Timeline and keeps follow off; `s` goes back. Drills are built from `Stats` on every frame, so they stay live.
+
+| Panel | Opens |
+|---|---|
+| Tools | every call of that tool, slowest first |
+| Where the time went | *Thinking*: the longest stretches with no tool running (`Stats::thinking`), each with the same agent's call before and after it and the tokens and cost of model calls that ended inside it. *Tools*: the slowest calls. *Waiting*: the longest pauses before a prompt (`Stats::waiting`). |
+| Cost by model | the prompts, turns and Followers that used the model, most expensive first |
+| Slowest, RAM eaters, CPU hogs | the call: who, where, status, times, CPU/RAM with the reading's mark explained, the turn's cost, its error or output; and every run of the same command |
+| Longest prompts | the prompt's turns |
+| Followers | the Follower's calls |
+
+hooktop only sees the timing and token counts of the model's work, never its text, so a thinking stretch shows where and how much, not what.
+
 A call still marked running counts up to now only while the session is working. In a session that's waiting or closed, it stops at the last activity; the graph also closes such calls as interrupted when their turn or Follower ends (see [events-and-graph.md](events-and-graph.md)).
 
 ## Themes

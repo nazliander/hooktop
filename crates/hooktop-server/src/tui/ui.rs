@@ -11,12 +11,13 @@ use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Axis, Block, BorderType, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, Padding, Paragraph, Row as TRow,
-    Table, Wrap,
+    Table, TableState, Wrap,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, Confirm, Focus, Mode, View};
 use super::dag;
+use super::drill::Panel;
 use super::theme::Theme;
 use hooktop_core::pricing::{format_tokens, format_usd};
 
@@ -56,22 +57,18 @@ pub fn draw(f: &mut Frame, app: &mut App, now: i64) {
         session(f, app, &t, main, now);
     }
 
+    if app.view == View::Stats && app.drill_open {
+        drill_overlay(f, app, &t, now);
+    }
     if app.help {
-        help(f, &t);
+        help(f, app, &t);
     }
 }
 
 // ── Chrome ─────────────────────────────────────────────────────────────
 
 fn title_bar(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
-    let n = app.sessions.len();
-    let open = app.open_count();
-    let mode = match app.mode {
-        Mode::Attached => "attached",
-        Mode::Embedded => "embedded",
-    };
     let mut left: Vec<Span> = vec![
-        Span::raw(" "),
         Span::raw(BOSS_ICON),
         Span::styled(" hooktop", Style::new().fg(t.accent).add_modifier(Modifier::BOLD)),
         Span::raw("   "),
@@ -86,27 +83,20 @@ fn title_bar(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
             Span::styled(format!(" {name} "), t.muted())
         });
     }
-    left.extend([
-        Span::styled(" o", Style::new().fg(t.accent)),
-        Span::styled("  ·  ", t.faint()),
-        Span::raw(format!("{n} connection{}", if n == 1 { "" } else { "s" })),
-        Span::styled(format!(", {open} open"), t.muted()),
-    ]);
-    left.push(Span::styled("  ·  ", t.faint()));
-    left.push(Span::styled(format!("{mode} :{}", app.port), t.muted()));
-
-    if app.follow {
+    // With the sidebar hidden, its count is the one thing worth keeping.
+    if !app.show_sidebar {
         left.push(Span::styled("  ·  ", t.faint()));
-        left.push(Span::styled("◉ following", Style::new().fg(t.accent)));
+        left.push(Span::styled(format!("{} open", app.open_count()), t.muted()));
     }
 
-    let link = if app.connected {
-        Span::styled("● live ", Style::new().fg(t.ok))
+    // The right side speaks up only when something needs attention; the
+    // port, mode and version live in the help (`?`).
+    let right = if app.connected {
+        Line::styled("● live", Style::new().fg(t.ok))
     } else {
-        Span::styled("○ reconnecting… ", Style::new().fg(t.err))
-    };
-    let version = app.server_version.as_deref().unwrap_or(crate::VERSION);
-    let right = Line::from(vec![link, Span::styled(format!("v{version} "), t.faint())]).alignment(Alignment::Right);
+        Line::styled("○ reconnecting…", Style::new().fg(t.err))
+    }
+    .alignment(Alignment::Right);
     let rw = right.width() as u16;
     let [l, r] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(rw)]).areas(area);
     f.render_widget(Line::from(left), l);
@@ -152,6 +142,27 @@ fn footer(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
             ]),
             area,
         );
+        return;
+    }
+    if app.view == View::Stats {
+        let keys: &[(&str, &str)] = if app.drill_open {
+            &[("↑↓", "pick"), ("⏎", "show in Timeline"), ("esc", "close")]
+        } else {
+            &[
+                ("q", "quit"),
+                ("tab ←→", "panel"),
+                ("↑↓", "row"),
+                ("⏎", "what's behind it"),
+                ("o", "next tab"),
+                ("?", "help"),
+            ]
+        };
+        let mut spans = Vec::new();
+        for (k, v) in keys {
+            spans.push(Span::styled(format!(" {k}"), Style::new().fg(t.accent)));
+            spans.push(Span::styled(format!(" {v} "), t.muted()));
+        }
+        f.render_widget(Line::from(spans), area);
         return;
     }
     let mut keys: Vec<(&str, &str)> = vec![("q", "quit"), ("tab", "pane"), ("↑↓", "move")];
@@ -532,8 +543,9 @@ struct Bar {
     extra: Option<Span<'static>>,
 }
 
-fn bars(f: &mut Frame, t: &Theme, area: Rect, title: &str, rows: Vec<Bar>, empty: &str) {
-    let block = panel(t, title, false);
+#[allow(clippy::too_many_arguments)]
+fn bars(f: &mut Frame, t: &Theme, area: Rect, title: &str, rows: Vec<Bar>, empty: &str, sel: Option<usize>) {
+    let block = panel(t, title, sel.is_some());
     let inner = block.inner(area);
     f.render_widget(block, area);
     if rows.is_empty() {
@@ -544,10 +556,15 @@ fn bars(f: &mut Frame, t: &Theme, area: Rect, title: &str, rows: Vec<Bar>, empty
     let label_w = rows.iter().map(|r| r.label.width()).max().unwrap_or(4).clamp(4, 12) + 1;
     let text_w = rows.iter().map(|r| r.text.width()).max().unwrap_or(0) + 1;
     let bar_w = (inner.width as usize).saturating_sub(label_w + text_w + 4);
+    // Keep the selected row in view.
+    let sel = sel.map(|i| i.min(rows.len() - 1));
+    let skip = sel.map_or(0, |i| (i + 1).saturating_sub(inner.height as usize));
     let lines: Vec<Line> = rows
         .into_iter()
+        .enumerate()
+        .skip(skip)
         .take(inner.height as usize)
-        .map(|r| {
+        .map(|(i, r)| {
             let mut spans = vec![
                 Span::styled(
                     format!("{:<label_w$}", ellipsize(&r.label, label_w - 1)),
@@ -557,7 +574,8 @@ fn bars(f: &mut Frame, t: &Theme, area: Rect, title: &str, rows: Vec<Bar>, empty
                 Span::styled(format!(" {}", r.text), t.muted()),
             ];
             spans.extend(r.extra);
-            Line::from(spans)
+            let line = Line::from(spans);
+            if sel == Some(i) { line.style(t.selected()) } else { line }
         })
         .collect();
     f.render_widget(Paragraph::new(lines), inner);
@@ -586,16 +604,10 @@ fn tile(f: &mut Frame, t: &Theme, area: Rect, title: &str, value: String, color:
 
 fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
     let Some(g) = &app.graph else { return };
-    let st = hooktop_core::stats::stats_with(
-        g,
-        now,
-        8,
-        &app.pricing,
-        hooktop_core::stats::Options {
-            automated_prompts: &app.automated_prompts,
-        },
-    );
+    let Some(st) = app.stats(now) else { return };
     let costs = &st.costs;
+    // The row under the cursor, in the panel that has it.
+    let sel = |p: Panel| (app.focus == Focus::History && app.stats_panel == p).then_some(app.stats_row);
 
     let tall = area.height >= 34;
     let [tiles, mix_row, calls_row, res_row] = Layout::vertical([
@@ -727,6 +739,7 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         "Cost by model · API prices",
         cost_rows,
         "No token usage yet: hooktop reads it from Claude Code's transcript.",
+        sel(Panel::Models),
     );
     // One row per tool: how often it ran and how long it took in total.
     let mix_rows: Vec<Bar> = st
@@ -740,7 +753,15 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
             extra: (m.failed > 0).then(|| Span::styled(format!(" {}✗", m.failed), Style::new().fg(t.err))),
         })
         .collect();
-    bars(f, t, mix_a, "Tools · calls and time", mix_rows, "No tool calls yet.");
+    bars(
+        f,
+        t,
+        mix_a,
+        "Tools · calls and time",
+        mix_rows,
+        "No tool calls yet.",
+        sel(Panel::Tools),
+    );
     let split = st.time;
     let pct = |ms: i64| {
         if st.wall_ms > 0 {
@@ -763,7 +784,15 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         extra: None,
     })
     .collect();
-    bars(f, t, time_a, "Where the time went", time_rows, "Nothing yet.");
+    bars(
+        f,
+        t,
+        time_a,
+        "Where the time went",
+        time_rows,
+        "Nothing yet.",
+        sel(Panel::Time),
+    );
 
     // Slowest calls and longest prompts
     let [slow_a, prompt_a] = Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)])
@@ -811,6 +840,7 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
             Constraint::Min(7),
         ],
         "No tool calls yet.",
+        sel(Panel::Slowest),
     );
     let rows: Vec<TRow> = st
         .longest_prompts
@@ -850,6 +880,7 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
             Constraint::Length(7),
         ],
         "No prompts yet.",
+        sel(Panel::Prompts),
     );
 
     // Resources
@@ -891,7 +922,7 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
             .collect();
         (!keys.is_empty()).then(|| Line::styled(format!(" {} ", keys.join(" · ")), t.faint()).right_aligned())
     };
-    let ram_block = panel(t, "RAM eaters · peak", false);
+    let ram_block = panel(t, "RAM eaters · peak", sel(Panel::Ram).is_some());
     let ram_block = match legend(&st.ram_eaters) {
         Some(l) => ram_block.title_bottom(l),
         None => ram_block,
@@ -904,8 +935,9 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         call_rows(&st.ram_eaters, true),
         vec![Constraint::Fill(1), Constraint::Length(8), Constraint::Length(1)],
         no_samples,
+        sel(Panel::Ram),
     );
-    let cpu_block = panel(t, "CPU hogs · avg cores", false);
+    let cpu_block = panel(t, "CPU hogs · avg cores", sel(Panel::Cpu).is_some());
     let cpu_block = match legend(&st.cpu_hogs) {
         Some(l) => cpu_block.title_bottom(l),
         None => cpu_block,
@@ -918,6 +950,7 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         call_rows(&st.cpu_hogs, false),
         vec![Constraint::Fill(1), Constraint::Length(5), Constraint::Length(1)],
         no_samples,
+        sel(Panel::Cpu),
     );
     let [proc_a, foll_a] = Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(side_a);
     let proc_rows: Vec<Bar> = st
@@ -931,7 +964,7 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
             extra: None,
         })
         .collect();
-    bars(f, t, proc_a, "Busiest processes", proc_rows, no_samples);
+    bars(f, t, proc_a, "Busiest processes", proc_rows, no_samples, None);
     let foll_rows: Vec<Bar> = st
         .follower_runs
         .iter()
@@ -953,14 +986,43 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         })
         .collect();
     let foll_title = format!("Followers · {}", st.followers);
-    bars(f, t, foll_a, &foll_title, foll_rows, "Watcher worked alone.");
+    bars(
+        f,
+        t,
+        foll_a,
+        &foll_title,
+        foll_rows,
+        "Watcher worked alone.",
+        sel(Panel::Followers),
+    );
 }
 
-fn table(f: &mut Frame, t: &Theme, area: Rect, title: &str, rows: Vec<TRow>, widths: Vec<Constraint>, empty: &str) {
-    table_in(f, t, area, panel(t, title, false), rows, widths, empty);
+#[allow(clippy::too_many_arguments)]
+fn table(
+    f: &mut Frame,
+    t: &Theme,
+    area: Rect,
+    title: &str,
+    rows: Vec<TRow>,
+    widths: Vec<Constraint>,
+    empty: &str,
+    sel: Option<usize>,
+) {
+    table_in(f, t, area, panel(t, title, sel.is_some()), rows, widths, empty, sel);
 }
 
-fn table_in(f: &mut Frame, t: &Theme, area: Rect, block: Block, rows: Vec<TRow>, widths: Vec<Constraint>, empty: &str) {
+/// A table in `block`; `sel` is the highlighted row when the panel has the cursor.
+#[allow(clippy::too_many_arguments)]
+fn table_in(
+    f: &mut Frame,
+    t: &Theme,
+    area: Rect,
+    block: Block,
+    rows: Vec<TRow>,
+    widths: Vec<Constraint>,
+    empty: &str,
+    sel: Option<usize>,
+) {
     if rows.is_empty() {
         f.render_widget(
             Paragraph::new(Line::styled(empty.to_string(), t.muted())).block(block),
@@ -968,7 +1030,16 @@ fn table_in(f: &mut Frame, t: &Theme, area: Rect, block: Block, rows: Vec<TRow>,
         );
         return;
     }
-    f.render_widget(Table::new(rows, widths).block(block).column_spacing(1), area);
+    let n = rows.len();
+    let mut state = TableState::default().with_selected(sel.map(|i| i.min(n - 1)));
+    f.render_stateful_widget(
+        Table::new(rows, widths)
+            .block(block)
+            .column_spacing(1)
+            .row_highlight_style(t.selected()),
+        area,
+        &mut state,
+    );
 }
 
 /// A bar `cells` wide (fractional), drawn with eighth blocks.
@@ -1640,12 +1711,95 @@ fn took(status: Status, ms: i64) -> String {
     }
 }
 
+// ── Statistics details ─────────────────────────────────────────────────
+
+fn drill_overlay(f: &mut Frame, app: &App, t: &Theme, now: i64) {
+    let Some(st) = app.stats(now) else { return };
+    let Some(d) = app.drill(&st) else { return };
+    let area = f.area();
+    let w = (area.width * 9 / 10).clamp(40, 130).min(area.width.saturating_sub(2));
+    // Tall enough for the facts and the list, at most most of the screen.
+    let want = d.facts.len() + d.items.len() + if d.note.is_some() { 6 } else { 4 } + 2;
+    let h = (want as u16)
+        .clamp(12, (area.height * 4 / 5).max(12))
+        .min(area.height.saturating_sub(2));
+    let rect = Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, rect);
+    let block = panel(t, &d.title, true)
+        .title_bottom(Line::styled(" ↑↓ pick · enter show in Timeline · esc close ", t.faint()).right_aligned());
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let key_w = d.facts.iter().map(|(k, _)| k.width()).max().unwrap_or(0) + 2;
+    let mut head: Vec<Line> = d
+        .facts
+        .iter()
+        .map(|(k, v)| {
+            Line::from(vec![
+                Span::styled(format!("{k:<key_w$}"), t.muted()),
+                Span::styled(v.clone(), Style::new().fg(t.ink)),
+            ])
+        })
+        .collect();
+    if let Some(n) = &d.note {
+        head.push(Line::raw(""));
+        head.push(Line::styled(n.clone(), t.faint()));
+    }
+    head.push(Line::raw(""));
+    head.push(Line::styled(
+        d.items_title.clone(),
+        Style::new().fg(t.ink).add_modifier(Modifier::BOLD),
+    ));
+    // Rows the head needs once wrapped, so the list starts right below it.
+    let cols = inner.width.max(1) as usize;
+    let head_h: u16 = head.iter().map(|l| l.width().max(1).div_ceil(cols) as u16).sum();
+    let [top, list] = Layout::vertical([Constraint::Length(head_h), Constraint::Fill(1)]).areas(inner);
+    f.render_widget(Paragraph::new(head).wrap(Wrap { trim: false }), top);
+
+    if d.items.is_empty() {
+        f.render_widget(Paragraph::new(Line::styled("Nothing here yet.", t.muted())), list);
+        return;
+    }
+    let value_w = d.items.iter().map(|i| i.value.width()).max().unwrap_or(0) as u16;
+    let rows: Vec<TRow> = d
+        .items
+        .iter()
+        .map(|i| {
+            TRow::new(vec![
+                Cell::from(Line::from(vec![
+                    Span::styled(
+                        i.label.clone(),
+                        Style::new()
+                            .fg(if i.failed { t.err } else { t.ink })
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("  {}", i.detail), t.muted()),
+                ])),
+                Cell::from(Line::styled(i.value.clone(), Style::new().fg(t.ink)).alignment(Alignment::Right)),
+            ])
+        })
+        .collect();
+    let mut state = TableState::default().with_selected(Some(app.drill_sel.min(d.items.len() - 1)));
+    f.render_stateful_widget(
+        Table::new(rows, [Constraint::Fill(1), Constraint::Length(value_w)])
+            .column_spacing(2)
+            .row_highlight_style(t.selected()),
+        list,
+        &mut state,
+    );
+}
+
 // ── Help ───────────────────────────────────────────────────────────────
 
-fn help(f: &mut Frame, t: &Theme) {
+fn help(f: &mut Frame, app: &App, t: &Theme) {
     let keys: &[(&str, &str)] = &[
         ("o / O", "next / previous tab: Timeline, Graph, Statistics"),
-        ("s", "statistics"),
+        ("s", "statistics; there, tab picks a panel and enter opens a row"),
         ("x", "remove this connection and its history"),
         ("X", "remove closed and long-quiet connections"),
         ("tab / shift-tab", "next / previous pane (1 2 3 jump)"),
@@ -1688,6 +1842,20 @@ fn help(f: &mut Frame, t: &Theme) {
             Span::raw(*v),
         ]));
     }
+    let mode = match app.mode {
+        Mode::Attached => "attached to",
+        Mode::Embedded => "running",
+    };
+    let server = app.server_version.as_deref().unwrap_or(crate::VERSION);
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "hooktop v{} · {mode} the server on :{} (v{server})",
+            crate::VERSION,
+            app.port
+        ),
+        t.faint(),
+    ));
     let area = f.area();
     let w = 80.min(area.width.saturating_sub(2));
     // Rows after wrapping, inside the border and padding.

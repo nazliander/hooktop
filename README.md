@@ -56,7 +56,7 @@ Press `o` to move between them.
 
 - **Timeline:** CPU and RAM charts, the party (Watcher and its Followers), and the history of prompts, turns and tool calls on one time axis, with what each one cost.
 - **Graph:** tasks as nodes and edges; Enter on a node lists its tool calls.
-- **Statistics:** where the time went (Claude thinking, tools running, waiting for you), each tool's calls and time, cost by model, the slowest calls and prompts, the biggest RAM and CPU users, and how long each Follower ran. Repeated commands are grouped (`×3`), and calls that start a Follower are left out of the slowest list, since the Followers ranking shows them.
+- **Statistics:** where the time went (Claude thinking, tools running, waiting for you), each tool's calls and time, cost by model, the slowest calls and prompts, the biggest RAM and CPU users, and how long each Follower ran. Repeated commands are grouped (`×3`), and calls that start a Follower are left out of the slowest list, since the Followers ranking shows them. Press `Tab` to pick a panel and `Enter` on a row to see what's behind it: every call of a tool, the longest thinking stretches and what came before and after them, where a model's cost went, a call's full details. `Enter` on an item shows it in the Timeline.
 
 | Graph | Statistics |
 |---|---|
@@ -70,6 +70,7 @@ Press `o` to move between them.
 | `↑ ↓ → ←` or `j k l h` | Move, open and close |
 | `Enter` | Open a row or node; on a tool call that sent a Follower, jump to it |
 | `Esc` | Back to Watcher |
+| `Tab`, `Enter` on Statistics | Pick a panel; see what's behind a row, then `Enter` again to find it in the Timeline |
 | `f` | Follow the connection Claude is working in |
 | `x` / `X` | Remove this connection / all closed and quiet ones (asks first) |
 | `e` / `c` | Open / close everything |

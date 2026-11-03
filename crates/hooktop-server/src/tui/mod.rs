@@ -8,6 +8,7 @@
 pub mod app;
 pub mod client;
 pub mod dag;
+pub mod drill;
 pub mod theme;
 pub mod ui;
 

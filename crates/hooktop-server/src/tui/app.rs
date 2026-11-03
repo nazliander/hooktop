@@ -11,7 +11,9 @@ use ratatui::widgets::{ListState, TableState};
 
 use super::client::{Net, ServerMsg, remove_msg, remove_stale_msg, subscribe_msg};
 use super::dag;
+use super::drill::{self, Drill, Panel};
 use super::theme::ThemeName;
+use hooktop_core::stats::Stats;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -115,6 +117,12 @@ pub struct App {
     pub pricing: hooktop_core::pricing::Pricing,
     /// Prompts starting with one of these are automated, not yours.
     pub automated_prompts: Vec<String>,
+    /// On the Statistics tab: the panel and row the cursor is on, and
+    /// whether that row's details are open (with their cursor).
+    pub stats_panel: Panel,
+    pub stats_row: usize,
+    pub drill_open: bool,
+    pub drill_sel: usize,
     flash: Option<(String, Instant)>,
 
     pub quit: bool,
@@ -157,6 +165,10 @@ impl App {
             hook_warning: None,
             pricing: hooktop_core::pricing::Pricing::builtin(),
             automated_prompts: Vec::new(),
+            stats_panel: Panel::Tools,
+            stats_row: 0,
+            drill_open: false,
+            drill_sel: 0,
             flash: None,
             quit: false,
             outbox: Vec::new(),
@@ -194,6 +206,64 @@ impl App {
         }
         let rows = self.rows();
         self.hist_state.selected().and_then(|i| rows.get(i).cloned())
+    }
+
+    /// The Statistics tab's numbers for the open session.
+    pub fn stats(&self, now: i64) -> Option<Stats> {
+        let g = self.graph.as_ref()?;
+        Some(hooktop_core::stats::stats_with(
+            g,
+            now,
+            8,
+            &self.pricing,
+            hooktop_core::stats::Options {
+                automated_prompts: &self.automated_prompts,
+            },
+        ))
+    }
+
+    /// The details behind the Statistics row under the cursor.
+    pub fn drill(&self, st: &Stats) -> Option<Drill> {
+        drill::build(
+            self.graph.as_ref()?,
+            st,
+            &self.pricing,
+            self.stats_panel,
+            self.stats_row,
+        )
+    }
+
+    /// Show a task or tool call in the Timeline, with its prompt and turn
+    /// open and the cursor on it.
+    pub fn jump_to(&mut self, (task, tool): drill::Target) {
+        let Some(g) = &self.graph else { return };
+        let Some(t) = g.task(task) else { return };
+        let agent = (t.header.kind == TaskKind::Subagent).then_some(task);
+        if t.header.kind == TaskKind::Turn
+            && let Some(p) = view::prompt_of_turn(g, task)
+        {
+            self.expanded.insert(p);
+        }
+        self.expanded.insert(task);
+        self.drill_open = false;
+        self.view = View::Timeline;
+        self.focus = Focus::History;
+        self.show_agent(agent);
+        self.follow = false;
+        let rows = self.rows();
+        let i = rows
+            .iter()
+            .position(|r| r.task == task && r.tool == tool)
+            .or_else(|| rows.iter().position(|r| r.task == task));
+        if let Some(i) = i {
+            self.select_row(&rows, i);
+        }
+        let what = match (tool, self.graph.as_ref().and_then(|g| g.task(task))) {
+            (Some(i), Some(t)) => t.tools.get(i).map_or(String::new(), |c| c.name.clone()),
+            (None, Some(t)) => t.header.label.clone(),
+            _ => String::new(),
+        };
+        self.say(format!("Timeline: {what} · s back to Statistics"));
     }
 
     pub fn layout(&self) -> dag::Layout {
@@ -508,6 +578,10 @@ impl App {
             }
             return;
         }
+        if self.drill_open && self.view == View::Stats {
+            self.key_drill(key.code);
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.help = true,
@@ -592,7 +666,7 @@ impl App {
                 Focus::Connections => self.key_connections(key.code),
                 Focus::Party => self.key_party(key.code),
                 Focus::History if self.view == View::Graph => self.key_graph(key.code),
-                Focus::History if self.view == View::Stats => {}
+                Focus::History if self.view == View::Stats => self.key_stats(key.code),
                 Focus::History => self.key_history(key.code),
             },
         }
@@ -609,6 +683,28 @@ impl App {
     }
 
     fn cycle_focus(&mut self, forward: bool) {
+        // On Statistics, tab walks the panels (and the sidebar around them).
+        if self.view == View::Stats {
+            let into = |app: &mut Self, p: Panel| {
+                app.focus = Focus::History;
+                app.stats_panel = p;
+                app.stats_row = 0;
+            };
+            let first = if forward {
+                Panel::ALL[0]
+            } else {
+                Panel::ALL[Panel::ALL.len() - 1]
+            };
+            match self.focus {
+                Focus::History => match self.stats_panel.step(forward) {
+                    Some(p) => into(self, p),
+                    None if self.show_sidebar => self.focus = Focus::Connections,
+                    None => into(self, first),
+                },
+                _ => into(self, first),
+            }
+            return;
+        }
         let mut order = match self.view {
             View::Timeline => vec![Focus::Party, Focus::History],
             View::Graph | View::Stats => vec![Focus::History],
@@ -619,6 +715,49 @@ impl App {
         let i = order.iter().position(|f| *f == self.focus).unwrap_or(0);
         let n = order.len();
         self.focus = order[if forward { (i + 1) % n } else { (i + n - 1) % n }];
+    }
+
+    fn key_stats(&mut self, code: KeyCode) {
+        let Some(st) = self.stats(crate::now_ms()) else { return };
+        let n = self.stats_panel.len(&st);
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => self.stats_row = self.stats_row.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.stats_row = (self.stats_row + 1).min(n.saturating_sub(1)),
+            KeyCode::Home | KeyCode::Char('g') => self.stats_row = 0,
+            KeyCode::End | KeyCode::Char('G') => self.stats_row = n.saturating_sub(1),
+            KeyCode::Left | KeyCode::Char('h') => self.cycle_focus(false),
+            KeyCode::Right | KeyCode::Char('l') => self.cycle_focus(true),
+            KeyCode::Enter | KeyCode::Char(' ') if n > 0 => {
+                self.drill_open = true;
+                self.drill_sel = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn key_drill(&mut self, code: KeyCode) {
+        let Some(st) = self.stats(crate::now_ms()) else { return };
+        let Some(d) = self.drill(&st) else {
+            self.drill_open = false;
+            return;
+        };
+        let n = d.items.len();
+        match code {
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('h') => {
+                self.drill_open = false;
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.drill_sel = self.drill_sel.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.drill_sel = (self.drill_sel + 1).min(n.saturating_sub(1)),
+            KeyCode::Home | KeyCode::Char('g') => self.drill_sel = 0,
+            KeyCode::End | KeyCode::Char('G') => self.drill_sel = n.saturating_sub(1),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                match d.items.get(self.drill_sel).and_then(|i| i.target) {
+                    Some(t) => self.jump_to(t),
+                    None => self.say("Nothing to show in the Timeline for this one"),
+                }
+            }
+            _ => {}
+        }
     }
 
     fn key_connections(&mut self, code: KeyCode) {
