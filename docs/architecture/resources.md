@@ -72,6 +72,9 @@ In the UI these read as **Open · working**, **Open · waiting for you** and **C
 Readings are per session, not per tool, so the Statistics tab attributes them by time:
 
 - A tool call gets every reading taken between its start and end: **peak RSS** (RAM eaters) and **average CPU** (CPU hogs).
-- A call shorter than the sampling interval borrows the first reading within 1.5 s after it started.
-- When calls run in parallel they share readings, so the rankings show what ran while the machine was busy rather than an exact split.
+- A call shorter than the sampling interval borrows the first reading within 1.5 s after it started. The rankings mark it **borrowed**.
+- When calls run in parallel they share readings, so the rankings show what ran while the machine was busy rather than an exact split. A call with a reading taken while another call was running is marked **shared**.
+- An unmarked entry had its readings to itself. Each entry carries this as `CallStat::reading` (`Own`, `Shared` or `Borrowed`); borrowed wins when both apply.
+
+Treat a marked entry as a lead ("memory was high around then"), not as that call's own usage.
 - **Busiest processes** counts how long each process name was the top consumer: each reading lasts until the next one, capped at 2 s so gaps while Claude waited don't count.

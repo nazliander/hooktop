@@ -21,6 +21,45 @@ pub struct CallStat {
     /// Highest memory and average CPU seen while it ran (needs samples).
     pub peak_rss: Option<u64>,
     pub avg_cpu: Option<f32>,
+    /// How much those readings really belong to this call.
+    pub reading: Reading,
+}
+
+/// Readings are per session, taken about once a second, so a call's CPU
+/// and RAM are a lead, not an exact per-tool measurement. This says how
+/// loose the lead is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Reading {
+    /// Every reading was taken while only this call ran.
+    #[default]
+    Own,
+    /// Another call was running when a reading was taken, so the numbers
+    /// cover both.
+    Shared,
+    /// The call was shorter than the sampling interval: no reading fell
+    /// inside it, so it borrows the first one after it started.
+    Borrowed,
+}
+
+impl Reading {
+    /// A one-character marker for tight columns, or `None` for
+    /// [`Reading::Own`].
+    pub fn mark(self) -> Option<&'static str> {
+        match self {
+            Reading::Own => None,
+            Reading::Shared => Some("≈"),
+            Reading::Borrowed => Some("↳"),
+        }
+    }
+
+    /// A short label for the UI, or `None` for [`Reading::Own`].
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Reading::Own => None,
+            Reading::Shared => Some("shared"),
+            Reading::Borrowed => Some("borrowed"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -229,11 +268,33 @@ pub fn stats(g: &SessionGraph, now: i64, top: usize, pricing: &Pricing) -> Stats
     let mut s = Stats::default();
 
     // Calls, with what the samples saw while each ran.
+    let spans: Vec<(i64, i64)> = g
+        .tasks
+        .iter()
+        .flat_map(|t| t.tools.iter())
+        .map(|c| (c.started_ms, end_of(c.status, c.started_ms, c.ended_ms)))
+        .collect();
     let mut calls = Vec::new();
+    let mut n = 0;
     for t in &g.tasks {
         for (i, c) in t.tools.iter().enumerate() {
-            let end = end_of(c.status, c.started_ms, c.ended_ms);
-            let (peak_rss, avg_cpu) = during(g, c.started_ms, end);
+            let (start, end) = spans[n];
+            let me = n;
+            n += 1;
+            let (peak_rss, avg_cpu, picked, borrowed) = during(g, start, end);
+            let shared = picked.iter().any(|at| {
+                spans
+                    .iter()
+                    .enumerate()
+                    .any(|(j, (s, e))| j != me && s <= at && at <= e)
+            });
+            let reading = if borrowed {
+                Reading::Borrowed
+            } else if shared {
+                Reading::Shared
+            } else {
+                Reading::Own
+            };
             calls.push(CallStat {
                 task: t.header.id,
                 tool: i,
@@ -244,6 +305,7 @@ pub fn stats(g: &SessionGraph, now: i64, top: usize, pricing: &Pricing) -> Stats
                 took_ms: (end - c.started_ms).max(0),
                 peak_rss,
                 avg_cpu,
+                reading,
             });
         }
     }
@@ -375,15 +437,17 @@ pub fn stats(g: &SessionGraph, now: i64, top: usize, pricing: &Pricing) -> Stats
     s
 }
 
-/// Peak memory and average CPU over `[start, end]`. A call shorter than
-/// the sampling interval borrows the first reading after it started.
-fn during(g: &SessionGraph, start: i64, end: i64) -> (Option<u64>, Option<f32>) {
+/// Peak memory and average CPU over `[start, end]`, the times of the
+/// readings used, and whether they were borrowed: a call shorter than the
+/// sampling interval borrows the first reading after it started.
+fn during(g: &SessionGraph, start: i64, end: i64) -> (Option<u64>, Option<f32>, Vec<i64>, bool) {
     let inside: Vec<_> = g
         .samples
         .iter()
         .filter(|x| x.at_ms >= start && x.at_ms <= end)
         .collect();
-    let picked = if inside.is_empty() {
+    let borrowed = inside.is_empty();
+    let picked: Vec<_> = if borrowed {
         g.samples
             .iter()
             .find(|x| x.at_ms >= start && x.at_ms - start <= 1_500)
@@ -393,11 +457,11 @@ fn during(g: &SessionGraph, start: i64, end: i64) -> (Option<u64>, Option<f32>) 
         inside
     };
     if picked.is_empty() {
-        return (None, None);
+        return (None, None, Vec::new(), false);
     }
     let peak = picked.iter().map(|x| x.rss).max();
     let avg = picked.iter().map(|x| x.cpu).sum::<f32>() / picked.len() as f32;
-    (peak, Some(avg))
+    (peak, Some(avg), picked.iter().map(|x| x.at_ms).collect(), borrowed)
 }
 
 #[cfg(test)]
@@ -491,7 +555,37 @@ mod tests {
         // A 50 ms Read borrows the next reading within 1.5 s.
         let read = s.slowest.iter().find(|c| c.name == "Read").unwrap();
         assert_eq!(read.peak_rss, Some(100));
+        assert_eq!(read.reading, Reading::Borrowed);
+        assert_eq!(s.ram_eaters[0].reading, Reading::Own, "Bash ran alone");
         assert!((s.failure_rate() - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parallel_calls_share_readings() {
+        let mut g = graph();
+        // A second Bash that overlaps the first one's readings.
+        g.apply_delta(&Delta::Tool {
+            task_id: 1,
+            tool: ToolCall {
+                id: "d".into(),
+                name: "Bash".into(),
+                target: "npm test".into(),
+                status: Status::Done,
+                started_ms: 1_500,
+                ended_ms: Some(2_500),
+                input: Value::Null,
+                output: None,
+                error: None,
+                spawned_task: None,
+            },
+        });
+        let s = stats(&g, 10_000, 5, &Pricing::builtin());
+        let of = |target: &str| s.ram_eaters.iter().find(|c| c.target == target).unwrap().reading;
+        assert_eq!(of("npm test"), Reading::Shared);
+        assert_eq!(of("Bash target"), Reading::Shared);
+        assert_eq!(Reading::Shared.label(), Some("shared"));
+        assert_eq!(Reading::Own.label(), None);
+        assert_eq!(Reading::Borrowed.mark(), Some("↳"));
     }
 
     #[test]

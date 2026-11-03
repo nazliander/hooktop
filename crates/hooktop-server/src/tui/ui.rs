@@ -5,13 +5,13 @@ use hooktop_core::view::{self, Member, Role, Row, RowKind};
 
 use hooktop_core::{Sample, SessionGraph, SessionStatus, SessionSummary, Status, Task, ToolCall};
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, BorderType, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, Paragraph, Row as TRow, Table,
-    Wrap,
+    Axis, Block, BorderType, Cell, Chart, Clear, Dataset, GraphType, List, ListItem, Padding, Paragraph, Row as TRow,
+    Table, Wrap,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -23,17 +23,27 @@ use hooktop_core::pricing::{format_tokens, format_usd};
 pub const BOSS_ICON: &str = "🦊";
 pub const FOLLOWER_ICON: &str = "♞";
 
+/// Space between the window's edges and hooktop's panes.
+const WINDOW: Margin = Margin {
+    horizontal: 1,
+    vertical: 0,
+};
+/// Columns between panes that sit side by side.
+const GUTTER: u16 = 1;
+
 pub fn draw(f: &mut Frame, app: &mut App, now: i64) {
     let t = app.theme.theme();
-    let [top, body, foot] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
+    let [top, body, foot] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)])
+        .areas(f.area().inner(WINDOW));
 
     title_bar(f, app, &t, top);
     footer(f, app, &t, foot);
 
     let main = if app.show_sidebar && body.width >= 60 {
         let side_w = (body.width / 5).clamp(24, 34);
-        let [side, main] = Layout::horizontal([Constraint::Length(side_w), Constraint::Fill(1)]).areas(body);
+        let [side, main] = Layout::horizontal([Constraint::Length(side_w), Constraint::Fill(1)])
+            .spacing(GUTTER)
+            .areas(body);
         connections(f, app, &t, side, now);
         main
     } else {
@@ -196,6 +206,7 @@ fn panel<'a>(t: &Theme, title: &'a str, focused: bool) -> Block<'a> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(t.border(focused))
+        .padding(Padding::horizontal(1))
         .title(Span::styled(format!(" {title} "), title_style))
 }
 
@@ -337,7 +348,9 @@ fn session(f: &mut Frame, app: &mut App, t: &Theme, area: Rect, now: i64) {
     }
     if rest.width >= 120 {
         let dw = (rest.width / 3).clamp(36, 64);
-        let [h, d] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(dw)]).areas(rest);
+        let [h, d] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(dw)])
+            .spacing(GUTTER)
+            .areas(rest);
         main(f, app, h);
         details(f, app, t, d, now);
     } else {
@@ -362,7 +375,9 @@ fn session_span(g: &SessionGraph, now: i64) -> (i64, i64) {
 
 fn metrics(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
     let Some(g) = &app.graph else { return };
-    let [cpu_a, ram_a] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(area);
+    let [cpu_a, ram_a] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)])
+        .spacing(GUTTER)
+        .areas(area);
 
     if g.samples.is_empty() {
         let both = Rect {
@@ -585,7 +600,9 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
 
     // Tiles
     let n_tiles = if tiles.width >= 120 { 6 } else { 4 };
-    let cells = Layout::horizontal(vec![Constraint::Fill(1); n_tiles]).split(tiles);
+    let cells = Layout::horizontal(vec![Constraint::Fill(1); n_tiles])
+        .spacing(GUTTER)
+        .split(tiles);
     let mut tile_data = vec![
         (
             "Wall time",
@@ -649,8 +666,9 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
     }
 
     // Tool mix, time per tool, cost by model
-    let [mix_a, time_a, cost_a] =
-        Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)]).areas(mix_row);
+    let [mix_a, time_a, cost_a] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)])
+        .spacing(GUTTER)
+        .areas(mix_row);
     let cost_rows: Vec<Bar> = costs
         .by_model
         .iter()
@@ -700,7 +718,9 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
     bars(f, t, time_a, "Time per tool", time_rows, "No tool calls yet.");
 
     // Slowest calls and longest prompts
-    let [slow_a, prompt_a] = Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)]).areas(calls_row);
+    let [slow_a, prompt_a] = Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)])
+        .spacing(GUTTER)
+        .areas(calls_row);
     let max_took = st.slowest.first().map_or(1, |c| c.took_ms).max(1);
     let rows: Vec<TRow> = st
         .slowest
@@ -735,10 +755,11 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         rows,
         vec![
             Constraint::Length(2),
-            Constraint::Fill(1),
+            // The call's name wins over the agent and bar columns when space runs out.
+            Constraint::Min(14),
             Constraint::Length(13),
             Constraint::Length(9),
-            Constraint::Length(8),
+            Constraint::Min(7),
         ],
         "No tool calls yet.",
     );
@@ -783,8 +804,9 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
     );
 
     // Resources
-    let [ram_a, cpu_a, side_a] =
-        Layout::horizontal([Constraint::Fill(2), Constraint::Fill(2), Constraint::Fill(2)]).areas(res_row);
+    let [ram_a, cpu_a, side_a] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(2), Constraint::Fill(2)])
+        .spacing(GUTTER)
+        .areas(res_row);
     let no_samples = "No CPU/RAM readings for this session.";
     let call_rows = |list: &[hooktop_core::stats::CallStat], ram: bool| -> Vec<TRow<'static>> {
         list.iter()
@@ -803,26 +825,48 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
                     Cell::from(
                         Line::styled(v, Style::new().fg(if ram { t.read } else { t.exec })).alignment(Alignment::Right),
                     ),
+                    // Readings are per session: mark the ones that aren't this call's alone.
+                    Cell::from(Span::styled(c.reading.mark().unwrap_or(""), t.faint())),
                 ])
             })
             .collect()
     };
-    table(
+    // A key under each ranking, naming only the marks it uses.
+    let legend = |list: &[hooktop_core::stats::CallStat]| -> Option<Line<'static>> {
+        use hooktop_core::stats::Reading;
+        let keys: Vec<String> = [Reading::Shared, Reading::Borrowed]
+            .into_iter()
+            .filter(|r| list.iter().any(|c| c.reading == *r))
+            .map(|r| format!("{} {}", r.mark().unwrap_or(""), r.label().unwrap_or("")))
+            .collect();
+        (!keys.is_empty()).then(|| Line::styled(format!(" {} ", keys.join(" · ")), t.faint()).right_aligned())
+    };
+    let ram_block = panel(t, "RAM eaters · peak while running", false);
+    let ram_block = match legend(&st.ram_eaters) {
+        Some(l) => ram_block.title_bottom(l),
+        None => ram_block,
+    };
+    table_in(
         f,
         t,
         ram_a,
-        "RAM eaters · peak while running",
+        ram_block,
         call_rows(&st.ram_eaters, true),
-        vec![Constraint::Fill(1), Constraint::Length(8)],
+        vec![Constraint::Fill(1), Constraint::Length(8), Constraint::Length(1)],
         no_samples,
     );
-    table(
+    let cpu_block = panel(t, "CPU hogs · average while running", false);
+    let cpu_block = match legend(&st.cpu_hogs) {
+        Some(l) => cpu_block.title_bottom(l),
+        None => cpu_block,
+    };
+    table_in(
         f,
         t,
         cpu_a,
-        "CPU hogs · average while running",
+        cpu_block,
         call_rows(&st.cpu_hogs, false),
-        vec![Constraint::Fill(1), Constraint::Length(6)],
+        vec![Constraint::Fill(1), Constraint::Length(5), Constraint::Length(1)],
         no_samples,
     );
     let [proc_a, foll_a] = Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(side_a);
@@ -863,7 +907,10 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
 }
 
 fn table(f: &mut Frame, t: &Theme, area: Rect, title: &str, rows: Vec<TRow>, widths: Vec<Constraint>, empty: &str) {
-    let block = panel(t, title, false);
+    table_in(f, t, area, panel(t, title, false), rows, widths, empty);
+}
+
+fn table_in(f: &mut Frame, t: &Theme, area: Rect, block: Block, rows: Vec<TRow>, widths: Vec<Constraint>, empty: &str) {
     if rows.is_empty() {
         f.render_widget(
             Paragraph::new(Line::styled(empty.to_string(), t.muted())).block(block),
@@ -1569,6 +1616,11 @@ fn help(f: &mut Frame, t: &Theme) {
             "Each Claude Code session is a connection: open while it runs.",
             t.muted(),
         ),
+        Line::styled(
+            "CPU/RAM is read once a second for the whole session: ≈ shared, another call ran \
+             too; ↳ borrowed, too short for a reading, so it uses the next one.",
+            t.muted(),
+        ),
         Line::raw(""),
     ];
     for (k, v) in keys {
@@ -1578,8 +1630,11 @@ fn help(f: &mut Frame, t: &Theme) {
         ]));
     }
     let area = f.area();
-    let w = 72.min(area.width.saturating_sub(2));
-    let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let w = 80.min(area.width.saturating_sub(2));
+    // Rows after wrapping, inside the border and padding.
+    let inner_w = w.saturating_sub(4).max(1) as usize;
+    let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(inner_w)).sum();
+    let h = (rows as u16 + 2).min(area.height.saturating_sub(2));
     let rect = Rect {
         x: area.x + (area.width - w) / 2,
         y: area.y + (area.height - h) / 2,
