@@ -276,8 +276,13 @@ fn statistics_tab_ranks_the_run() {
     for want in [
         "Wall time",
         "Tool calls",
-        "Tool mix",
-        "Time per tool",
+        "Tools · calls and time",
+        "Peak CPU",
+        "Peak RAM",
+        "avg ",
+        "Where the time went",
+        "Thinking",
+        "Waiting",
         "Slowest tool calls",
         "Longest prompts",
         "RAM eaters",
@@ -297,6 +302,16 @@ fn statistics_tab_ranks_the_run() {
     assert_eq!(app.view, super::app::View::Timeline);
     key(&mut app, KeyCode::Char('O'));
     assert_eq!(app.view, super::app::View::Stats);
+}
+
+#[test]
+fn automated_prompts_are_counted_apart() {
+    let mut app = demo_app();
+    app.automated_prompts = vec!["Add a regression".into()];
+    key(&mut app, KeyCode::Char('s'));
+    let s = render(&mut app, 190, 50);
+    assert!(s.contains("1 automated"), "{s}");
+    assert!(!s.contains("Add a regre"), "not among the longest prompts:\n{s}");
 }
 
 #[test]

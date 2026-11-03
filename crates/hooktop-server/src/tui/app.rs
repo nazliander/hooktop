@@ -113,6 +113,8 @@ pub struct App {
     pub hook_warning: Option<String>,
     /// Prices for turning token usage into money.
     pub pricing: hooktop_core::pricing::Pricing,
+    /// Prompts starting with one of these are automated, not yours.
+    pub automated_prompts: Vec<String>,
     flash: Option<(String, Instant)>,
 
     pub quit: bool,
@@ -154,6 +156,7 @@ impl App {
             confirm: None,
             hook_warning: None,
             pricing: hooktop_core::pricing::Pricing::builtin(),
+            automated_prompts: Vec::new(),
             flash: None,
             quit: false,
             outbox: Vec::new(),

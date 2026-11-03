@@ -418,10 +418,10 @@ fn metrics(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
     let mut title = vec![
         Span::styled(" CPU ", Style::new().fg(t.ink).add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("{:.0}% ", cur.cpu),
+            format!("{} ", view::cores(cur.cpu)),
             Style::new().fg(t.exec).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("· peak {:.0}%", peak.cpu), t.muted()),
+        Span::styled(format!("· peak {}", view::cores(peak.cpu)), t.muted()),
     ];
     if let Some(top) = &peak.top {
         title.push(Span::styled(format!(" {top}"), Style::new().fg(t.accent)));
@@ -436,7 +436,7 @@ fn metrics(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         t.exec,
         span_s,
         cpu_max,
-        [format!("{}%", 0), format!("{:.0}%", cpu_max)],
+        ["0".into(), view::cores(cpu_max as f32)],
         sel,
     );
 
@@ -586,7 +586,15 @@ fn tile(f: &mut Frame, t: &Theme, area: Rect, title: &str, value: String, color:
 
 fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
     let Some(g) = &app.graph else { return };
-    let st = hooktop_core::stats::stats(g, now, 8, &app.pricing);
+    let st = hooktop_core::stats::stats_with(
+        g,
+        now,
+        8,
+        &app.pricing,
+        hooktop_core::stats::Options {
+            automated_prompts: &app.automated_prompts,
+        },
+    );
     let costs = &st.costs;
 
     let tall = area.height >= 34;
@@ -608,13 +616,17 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
             "Wall time",
             view::duration(st.wall_ms),
             t.accent,
-            format!("tools busy {}", view::duration(st.tool_ms)),
+            format!("working {}", view::duration(st.time.thinking_ms + st.time.tools_ms)),
         ),
         (
             "Prompts",
             st.prompts.to_string(),
             t.prompt,
-            format!("{} turn{}", st.turns, plural(st.turns)),
+            if st.automated_prompts > 0 {
+                format!("{} turns · {} automated", st.turns, st.automated_prompts)
+            } else {
+                format!("{} turn{}", st.turns, plural(st.turns))
+            },
         ),
         (
             "Tool calls",
@@ -642,24 +654,49 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         ),
     ];
     if n_tiles == 6 {
-        tile_data.push((
-            "Peak CPU",
-            st.peak_cpu.map_or("—".into(), |c| format!("{c:.0}%")),
-            t.exec,
-            match (&st.peak_cpu_process, st.avg_cpu) {
-                (Some(p), Some(a)) => format!("{p} · avg {a:.0}%"),
-                (None, Some(a)) => format!("avg {a:.0}%"),
-                _ => "no readings".into(),
-            },
-        ));
-        tile_data.push((
-            "Peak RAM",
-            st.peak_rss.map_or("—".into(), bytes),
-            t.read,
-            g.samples
-                .last()
-                .map_or("no readings".into(), |x| format!("now {}", bytes(x.rss))),
-        ));
+        // While Claude works, what's happening now matters most; once it
+        // stops, the last reading is stale and the peak tells the story.
+        let last = g.samples.last();
+        let working = g.status == SessionStatus::Running && last.is_some();
+        let avg_rss =
+            (!g.samples.is_empty()).then(|| g.samples.iter().map(|x| x.rss).sum::<u64>() / g.samples.len() as u64);
+        let peak_cpu = st.peak_cpu.map(view::cores);
+        let by = st
+            .peak_cpu_process
+            .as_deref()
+            .map(|p| format!(" · {p}"))
+            .unwrap_or_default();
+        if working {
+            let x = last.unwrap();
+            tile_data.push((
+                "CPU now",
+                view::cores(x.cpu),
+                t.exec,
+                format!("peak {}{by}", st.peak_cpu.map(view::cores_value).unwrap_or_default()),
+            ));
+            tile_data.push((
+                "RAM now",
+                bytes(x.rss),
+                t.read,
+                format!("peak {}", st.peak_rss.map(bytes).unwrap_or_default()),
+            ));
+        } else {
+            tile_data.push((
+                "Peak CPU",
+                peak_cpu.unwrap_or_else(|| "—".into()),
+                t.exec,
+                match st.avg_cpu {
+                    Some(a) => format!("avg {}{by}", view::cores_value(a)),
+                    None => "no readings".into(),
+                },
+            ));
+            tile_data.push((
+                "Peak RAM",
+                st.peak_rss.map_or("—".into(), bytes),
+                t.read,
+                avg_rss.map_or("no readings".into(), |a| format!("avg {}", bytes(a))),
+            ));
+        }
     }
     for (cell, (title, value, color, sub)) in cells.iter().zip(tile_data) {
         tile(f, t, *cell, title, value, color, sub);
@@ -691,31 +728,42 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         cost_rows,
         "No token usage yet: hooktop reads it from Claude Code's transcript.",
     );
+    // One row per tool: how often it ran and how long it took in total.
     let mix_rows: Vec<Bar> = st
         .mix
         .iter()
         .map(|m| Bar {
             label: m.name.clone(),
             value: m.count as f64,
-            text: m.count.to_string(),
+            text: format!("{} · {}", m.count, view::duration(m.total_ms)),
             color: t.tool(&m.name),
             extra: (m.failed > 0).then(|| Span::styled(format!(" {}✗", m.failed), Style::new().fg(t.err))),
         })
         .collect();
-    bars(f, t, mix_a, "Tool mix · calls", mix_rows, "No tool calls yet.");
-    let mut by_time = st.mix.clone();
-    by_time.sort_by_key(|m| std::cmp::Reverse(m.total_ms));
-    let time_rows: Vec<Bar> = by_time
-        .iter()
-        .map(|m| Bar {
-            label: m.name.clone(),
-            value: m.total_ms as f64,
-            text: view::duration(m.total_ms),
-            color: t.tool(&m.name),
-            extra: None,
-        })
-        .collect();
-    bars(f, t, time_a, "Time per tool", time_rows, "No tool calls yet.");
+    bars(f, t, mix_a, "Tools · calls and time", mix_rows, "No tool calls yet.");
+    let split = st.time;
+    let pct = |ms: i64| {
+        if st.wall_ms > 0 {
+            format!("{:.0}%", ms as f64 * 100.0 / st.wall_ms as f64)
+        } else {
+            "—".into()
+        }
+    };
+    let time_rows: Vec<Bar> = [
+        ("Thinking", split.thinking_ms, t.prompt),
+        ("Tools", split.tools_ms, t.exec),
+        ("Waiting", split.waiting_ms, t.line),
+    ]
+    .into_iter()
+    .map(|(label, ms, color)| Bar {
+        label: label.into(),
+        value: ms as f64,
+        text: format!("{} · {}", view::duration(ms), pct(ms)),
+        color,
+        extra: None,
+    })
+    .collect();
+    bars(f, t, time_a, "Where the time went", time_rows, "Nothing yet.");
 
     // Slowest calls and longest prompts
     let [slow_a, prompt_a] = Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)])
@@ -732,6 +780,7 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
                 Cell::from(Line::from(vec![
                     Span::styled("● ", Style::new().fg(t.tool(&c.name))),
                     Span::styled(c.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
+                    Span::styled(repeats(c.repeats), Style::new().fg(t.accent)),
                     Span::styled(format!(" {}", c.target), t.muted()),
                 ])),
                 Cell::from(Span::styled(who(c.agent_type.as_deref()), t.muted())),
@@ -814,12 +863,13 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
                 let v = if ram {
                     bytes(c.peak_rss.unwrap_or(0))
                 } else {
-                    format!("{:.0}%", c.avg_cpu.unwrap_or(0.0))
+                    view::cores_value(c.avg_cpu.unwrap_or(0.0))
                 };
                 TRow::new(vec![
                     Cell::from(Line::from(vec![
                         Span::styled("● ", Style::new().fg(t.tool(&c.name))),
                         Span::styled(c.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
+                        Span::styled(repeats(c.repeats), Style::new().fg(t.accent)),
                         Span::styled(format!(" {}", c.target), t.muted()),
                     ])),
                     Cell::from(
@@ -841,7 +891,7 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
             .collect();
         (!keys.is_empty()).then(|| Line::styled(format!(" {} ", keys.join(" · ")), t.faint()).right_aligned())
     };
-    let ram_block = panel(t, "RAM eaters · peak while running", false);
+    let ram_block = panel(t, "RAM eaters · peak", false);
     let ram_block = match legend(&st.ram_eaters) {
         Some(l) => ram_block.title_bottom(l),
         None => ram_block,
@@ -855,7 +905,7 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         vec![Constraint::Fill(1), Constraint::Length(8), Constraint::Length(1)],
         no_samples,
     );
-    let cpu_block = panel(t, "CPU hogs · average while running", false);
+    let cpu_block = panel(t, "CPU hogs · avg cores", false);
     let cpu_block = match legend(&st.cpu_hogs) {
         Some(l) => cpu_block.title_bottom(l),
         None => cpu_block,
@@ -876,7 +926,7 @@ fn stats_pane(f: &mut Frame, app: &App, t: &Theme, area: Rect, now: i64) {
         .map(|p| Bar {
             label: p.name.clone(),
             value: p.peak_cpu as f64,
-            text: format!("{:.0}% · on top {}", p.peak_cpu, view::duration(p.ms_on_top)),
+            text: format!("{} · top {}", view::cores(p.peak_cpu), view::duration(p.ms_on_top)),
             color: t.exec,
             extra: None,
         })
@@ -938,6 +988,11 @@ fn eighths(cells: f64) -> String {
     s
 }
 
+/// ` ×3` after a ranked call that stands for several identical ones.
+fn repeats(n: usize) -> String {
+    if n > 1 { format!(" ×{n}") } else { String::new() }
+}
+
 fn bytes(b: u64) -> String {
     let mb = b as f64 / (1024.0 * 1024.0);
     if mb >= 1024.0 {
@@ -994,7 +1049,11 @@ fn header(f: &mut Frame, app: &App, t: &Theme, area: Rect, members: &[Member], n
     let prompts = g
         .tasks
         .iter()
-        .filter(|x| x.header.kind == hooktop_core::TaskKind::Prompt && is_user_prompt(x))
+        .filter(|x| {
+            x.header.kind == hooktop_core::TaskKind::Prompt
+                && is_user_prompt(x)
+                && !hooktop_core::stats::is_automated(&x.header.title, &app.automated_prompts)
+        })
         .count();
     let tools: usize = g.tasks.iter().map(|x| x.tools.len()).sum();
     let failed: u32 = g.tasks.iter().map(|x| x.header.failed_count).sum();

@@ -156,6 +156,11 @@ struct TuiArgs {
     /// Run the server without a token (see `hooktop serve --help`).
     #[arg(long, conflicts_with = "token_file")]
     no_auth: bool,
+    /// Prompts starting with PREFIX come from your own tooling, not from
+    /// you: they don't count as prompts in Statistics. Repeat for several;
+    /// `automated_prompts` in config.json works too.
+    #[arg(long = "automated-prompt", value_name = "PREFIX")]
+    automated_prompts: Vec<String>,
 }
 
 fn parse_idle(s: &str) -> Result<i64, String> {
@@ -283,6 +288,7 @@ async fn main() -> std::process::ExitCode {
                 theme: args.theme,
                 token,
                 close_after: (args.close_after > 0).then(|| Duration::from_millis(args.close_after as u64)),
+                automated_prompts: args.automated_prompts,
             })
             .await
         }

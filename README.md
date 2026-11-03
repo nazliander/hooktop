@@ -56,7 +56,7 @@ Press `o` to move between them.
 
 - **Timeline:** CPU and RAM charts, the party (Watcher and its Followers), and the history of prompts, turns and tool calls on one time axis, with what each one cost.
 - **Graph:** tasks as nodes and edges; Enter on a node lists its tool calls.
-- **Statistics:** totals, cost by model, the slowest tool calls and prompts, the biggest RAM and CPU users, and how long each Follower ran.
+- **Statistics:** where the time went (Claude thinking, tools running, waiting for you), each tool's calls and time, cost by model, the slowest calls and prompts, the biggest RAM and CPU users, and how long each Follower ran. Repeated commands are grouped (`×3`), and calls that start a Follower are left out of the slowest list, since the Followers ranking shows them.
 
 | Graph | Statistics |
 |---|---|
@@ -93,6 +93,16 @@ Press `o` to move between them.
 | `hooktop reset` | Delete stored history (stop hooktop first) |
 
 Run `hooktop --help` for every flag.
+
+## Settings
+
+hooktop reads `config.json` next to its event store (`~/Library/Application Support/hooktop/` on macOS, `~/.local/share/hooktop/` on Linux):
+
+```json
+{ "automated_prompts": ["[Subagent hand-back]"] }
+```
+
+`automated_prompts` lists prefixes of messages your own tooling sends as prompts. They still show in the history, but Statistics doesn't count them as your prompts. `--automated-prompt <PREFIX>` does the same for one run.
 
 ## Security
 

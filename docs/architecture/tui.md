@@ -69,7 +69,15 @@ Navigation: ←/→ move along a lane, ↓ goes to the first Follower a node sen
 
 ## Statistics tab
 
-Drawn from `hooktop_core::stats::stats(g, now, 8)`: tiles (six on wide terminals, four on narrow), bar lists with eighth-block precision for tool mix, time per tool, busiest processes and Followers, and tables for slowest calls, longest prompts, RAM eaters and CPU hogs.
+Drawn from `hooktop_core::stats::stats_with(g, now, 8, pricing, options)`, where the options carry the automated-prompt prefixes from `config.json` and `--automated-prompt`.
+
+- **Tiles** (six on wide terminals, four on narrow). While Claude works, the CPU and RAM tiles show the latest reading with the peak underneath; once it stops, they show the peak with the average underneath, since the last reading is stale. CPU is in cores. Prompts leaves out automated ones and counts them underneath.
+- **Tools · calls and time**: one bar per tool by calls, with total time and failures.
+- **Where the time went** splits the wall time three ways, which add up to it. *Tools* is the time at least one tool call ran (the union, so parallel calls count once; calls that start a Follower don't count, the Follower's own calls do). *Thinking* is the rest of the time a prompt, turn or Follower was running. *Waiting* is everything else.
+- **Rankings** (slowest calls, RAM eaters, CPU hogs) group calls with the same tool and target into one row with a `×N` count, showing the biggest. The slowest list leaves out `Agent`/`Task` calls: their time is the Follower's whole run, shown under Followers. RAM and CPU rows carry the `≈` shared and `↳` borrowed marks described in [resources.md](resources.md).
+- Bar lists use eighth-block precision; the rankings are tables.
+
+A call still marked running counts up to now only while the session is working. In a session that's waiting or closed, it stops at the last activity; the graph also closes such calls as interrupted when their turn or Follower ends (see [events-and-graph.md](events-and-graph.md)).
 
 ## Themes
 

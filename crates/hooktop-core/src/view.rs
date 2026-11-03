@@ -311,6 +311,27 @@ pub fn history_rows(
 
 // ── Formatting ─────────────────────────────────────────────────────────
 
+/// CPU use as cores busy, from a percentage where 100 is one core:
+/// `0.3`, `4.0`, `12`. [`cores`] adds the unit.
+pub fn cores_value(pct: f32) -> String {
+    let c = pct.max(0.0) / 100.0;
+    if c >= 9.95 {
+        format!("{c:.0}")
+    } else {
+        format!("{c:.1}")
+    }
+}
+
+/// `0.3 cores`, `1.0 core`, `4.0 cores`.
+pub fn cores(pct: f32) -> String {
+    let v = cores_value(pct);
+    if v == "1.0" {
+        "1.0 core".into()
+    } else {
+        format!("{v} cores")
+    }
+}
+
 /// `850 ms`, `4.2 s`, `12 s`, `3m 05s`, `1h 07m`.
 pub fn duration(ms: i64) -> String {
     let ms = ms.max(0);
@@ -345,6 +366,15 @@ pub fn first_line(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_reads_as_cores() {
+        assert_eq!(cores(7.0), "0.1 cores");
+        assert_eq!(cores(100.0), "1.0 core");
+        assert_eq!(cores(400.0), "4.0 cores");
+        assert_eq!(cores(1488.0), "15 cores");
+        assert_eq!(cores_value(-3.0), "0.0");
+    }
     use crate::graph::{Delta, Edge, TaskHeader};
     use serde_json::json;
 

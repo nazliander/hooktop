@@ -23,6 +23,9 @@ pub struct CallStat {
     pub avg_cpu: Option<f32>,
     /// How much those readings really belong to this call.
     pub reading: Reading,
+    /// In a ranking, how many calls with the same tool and target this row
+    /// stands for (the one shown is the biggest).
+    pub repeats: usize,
 }
 
 /// Readings are per session, taken about once a second, so a call's CPU
@@ -234,6 +237,11 @@ pub struct Stats {
     pub wall_ms: i64,
     /// Sum of every tool call's duration (parallel calls add up).
     pub tool_ms: i64,
+    /// Where the wall time went.
+    pub time: TimeSplit,
+    /// Prompts that matched an automated prefix: not counted in `prompts`
+    /// or `longest_prompts`.
+    pub automated_prompts: usize,
     pub peak_cpu: Option<f32>,
     pub peak_cpu_process: Option<String>,
     pub peak_rss: Option<u64>,
@@ -246,6 +254,55 @@ pub struct Stats {
     pub processes: Vec<ProcessStat>,
     pub follower_runs: Vec<FollowerStat>,
     pub costs: Costs,
+}
+
+/// Where a session's wall time went. The three add up to the wall time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TimeSplit {
+    /// Claude working with no tool running: the model thinking and writing.
+    pub thinking_ms: i64,
+    /// At least one tool call running (parallel calls count once).
+    pub tools_ms: i64,
+    /// Between prompts: waiting for you.
+    pub waiting_ms: i64,
+}
+
+/// Options for [`stats_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Options<'a> {
+    /// Prompts starting with one of these are automated messages (from your
+    /// own tooling, say), not prompts you typed.
+    pub automated_prompts: &'a [String],
+}
+
+/// Is this prompt an automated one?
+pub fn is_automated(title: &str, prefixes: &[String]) -> bool {
+    let t = title.trim_start();
+    prefixes.iter().any(|p| !p.is_empty() && t.starts_with(p.as_str()))
+}
+
+/// Total length of the union of `spans`.
+fn union_ms(mut spans: Vec<(i64, i64)>) -> i64 {
+    spans.retain(|(a, b)| b > a);
+    spans.sort_unstable();
+    let (mut total, mut cur): (i64, Option<(i64, i64)>) = (0, None);
+    for (a, b) in spans {
+        match cur {
+            Some((ca, cb)) if a <= cb => cur = Some((ca, cb.max(b))),
+            Some((ca, cb)) => {
+                total += cb - ca;
+                cur = Some((a, b));
+            }
+            None => cur = Some((a, b)),
+        }
+    }
+    total + cur.map_or(0, |(a, b)| b - a)
+}
+
+/// Is this the call that starts a follower? Its time is the follower's
+/// whole run, which the Followers ranking already shows.
+fn spawns_follower(name: &str) -> bool {
+    matches!(name, "Agent" | "Task")
 }
 
 impl Stats {
@@ -261,9 +318,25 @@ impl Stats {
 /// Work out the stats; `now` closes anything still running, `top` caps
 /// each ranking.
 pub fn stats(g: &SessionGraph, now: i64, top: usize, pricing: &Pricing) -> Stats {
+    stats_with(g, now, top, pricing, Options::default())
+}
+
+/// [`stats`] with [`Options`].
+pub fn stats_with(g: &SessionGraph, now: i64, top: usize, pricing: &Pricing, opts: Options) -> Stats {
     let costs = costs(g, pricing);
+    // Something still running counts up to now only while Claude is working;
+    // in a session that's waiting or closed it stopped at the last activity.
+    let live_until = if g.status == crate::graph::SessionStatus::Running {
+        now
+    } else {
+        g.updated_ms
+    };
     let end_of = |status: Status, start: i64, end: Option<i64>| {
-        end.unwrap_or(if status == Status::Running { now } else { start })
+        end.unwrap_or(if status == Status::Running {
+            live_until.max(start)
+        } else {
+            start
+        })
     };
     let mut s = Stats::default();
 
@@ -306,6 +379,7 @@ pub fn stats(g: &SessionGraph, now: i64, top: usize, pricing: &Pricing) -> Stats
                 peak_rss,
                 avg_cpu,
                 reading,
+                repeats: 1,
             });
         }
     }
@@ -333,26 +407,46 @@ pub fn stats(g: &SessionGraph, now: i64, top: usize, pricing: &Pricing) -> Stats
             .then(a.name.cmp(&b.name))
     });
 
-    let by = |key: fn(&CallStat) -> Option<f64>| {
-        let mut v: Vec<CallStat> = calls.iter().filter(|c| key(c).is_some()).cloned().collect();
+    // Rankings: the same command run again is one row with a count, so a
+    // test suite run five times doesn't fill the list.
+    let by = |key: fn(&CallStat) -> Option<f64>, keep: fn(&CallStat) -> bool| {
+        let mut v: Vec<CallStat> = calls.iter().filter(|c| key(c).is_some() && keep(c)).cloned().collect();
         v.sort_by(|a, b| key(b).unwrap().total_cmp(&key(a).unwrap()));
-        v.truncate(top);
-        v
+        let mut out: Vec<CallStat> = Vec::new();
+        for c in v {
+            match out.iter_mut().find(|o| o.name == c.name && o.target == c.target) {
+                Some(o) => o.repeats += 1,
+                None => out.push(c),
+            }
+        }
+        out.truncate(top);
+        out
     };
-    s.slowest = by(|c| Some(c.took_ms as f64));
-    s.ram_eaters = by(|c| c.peak_rss.map(|r| r as f64));
-    s.cpu_hogs = by(|c| c.avg_cpu.map(f64::from));
+    s.slowest = by(|c| Some(c.took_ms as f64), |c| !spawns_follower(&c.name));
+    s.ram_eaters = by(|c| c.peak_rss.map(|r| r as f64), |_| true);
+    s.cpu_hogs = by(|c| c.avg_cpu.map(f64::from), |_| true);
 
     // Prompts: from the prompt to the end of its last turn.
+    let mut active: Vec<(i64, i64)> = Vec::new();
     for (p, turns) in view::prompt_groups(g) {
+        let span_of = |id: TaskId| {
+            let h = &g.tasks[id as usize].header;
+            (h.started_ms, end_of(h.status, h.started_ms, h.ended_ms))
+        };
+        active.extend(turns.iter().map(|t| span_of(*t)));
         let Some(pid) = p else { continue };
         let h = &g.tasks[pid as usize].header;
+        let last = turns.last().and_then(|t| g.tasks[*t as usize].header.ended_ms);
+        let end = h.ended_ms.or(last);
+        active.push((h.started_ms, end_of(h.status, h.started_ms, end)));
         if !matches!(h.label.as_str(), "Prompt" | "Command") {
             continue;
         }
+        if is_automated(&h.title, opts.automated_prompts) {
+            s.automated_prompts += 1;
+            continue;
+        }
         s.prompts += 1;
-        let last = turns.last().and_then(|t| g.tasks[*t as usize].header.ended_ms);
-        let end = h.ended_ms.or(last);
         s.longest_prompts.push(PromptStat {
             task: pid,
             title: view::first_line(&h.title).to_string(),
@@ -389,6 +483,29 @@ pub fn stats(g: &SessionGraph, now: i64, top: usize, pricing: &Pricing) -> Stats
         now.max(g.updated_ms)
     };
     s.wall_ms = (end - g.started_ms).max(0);
+
+    // Where the time went: working (any prompt, turn or follower running),
+    // and within that, tools running; the rest is waiting for you.
+    for t in g.tasks.iter().filter(|t| t.header.kind == TaskKind::Subagent) {
+        let h = &t.header;
+        active.push((h.started_ms, end_of(h.status, h.started_ms, h.ended_ms)));
+    }
+    let clip = |(a, b): (i64, i64)| (a.max(g.started_ms), b.min(end));
+    let working = union_ms(active.into_iter().map(clip).collect());
+    // A follower's run isn't a tool running: its own calls count, and the
+    // rest of it is thinking.
+    let tool_spans = spans
+        .iter()
+        .zip(&calls)
+        .filter(|(_, c)| !spawns_follower(&c.name))
+        .map(|(sp, _)| clip(*sp))
+        .collect();
+    let tools = union_ms(tool_spans).min(working);
+    s.time = TimeSplit {
+        thinking_ms: working - tools,
+        tools_ms: tools,
+        waiting_ms: (s.wall_ms - working).max(0),
+    };
 
     // Machine-wide numbers from the samples.
     if let Some(peak) = g.samples.iter().max_by(|a, b| a.cpu.total_cmp(&b.cpu)) {
@@ -558,6 +675,59 @@ mod tests {
         assert_eq!(read.reading, Reading::Borrowed);
         assert_eq!(s.ram_eaters[0].reading, Reading::Own, "Bash ran alone");
         assert!((s.failure_rate() - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn time_split_adds_up_and_counts_parallel_tools_once() {
+        let s = stats(&graph(), 10_000, 5, &Pricing::builtin());
+        // Tools: Read 50 ms + Grep 600 ms + Bash 3 s, none overlapping.
+        assert_eq!(s.time.tools_ms, 3_650);
+        assert_eq!(s.time.waiting_ms, 0, "the prompt spans the whole session");
+        assert_eq!(s.time.thinking_ms + s.time.tools_ms + s.time.waiting_ms, s.wall_ms);
+        assert_eq!(union_ms(vec![(0, 10), (5, 20), (30, 40), (35, 36)]), 30);
+    }
+
+    #[test]
+    fn repeats_group_agent_calls_stay_out_and_automated_prompts_are_counted_apart() {
+        let mut g = graph();
+        let call = |id: &str, name: &str, target: &str, start, end| Delta::Tool {
+            task_id: 1,
+            tool: ToolCall {
+                id: id.into(),
+                name: name.into(),
+                target: target.into(),
+                status: Status::Done,
+                started_ms: start,
+                ended_ms: Some(end),
+                input: Value::Null,
+                output: None,
+                error: None,
+                spawned_task: None,
+            },
+        };
+        g.apply_delta(&call("again", "Bash", "Bash target", 4_100, 4_900));
+        g.apply_delta(&call("spawn", "Agent", "Find it", 100, 8_000));
+        let auto = ["task 0".to_string()];
+        let s = stats_with(
+            &g,
+            10_000,
+            5,
+            &Pricing::builtin(),
+            Options {
+                automated_prompts: &auto,
+            },
+        );
+        let bash: Vec<_> = s.slowest.iter().filter(|c| c.name == "Bash").collect();
+        assert_eq!(bash.len(), 1, "one row for the same command");
+        assert_eq!((bash[0].repeats, bash[0].took_ms), (2, 3_000));
+        assert!(s.slowest.iter().all(|c| c.name != "Agent"));
+        assert_eq!((s.prompts, s.automated_prompts), (0, 1));
+        assert!(s.longest_prompts.is_empty());
+        assert!(is_automated(
+            "  [Subagent hand-back] ok",
+            &["[Subagent hand-back]".into()]
+        ));
+        assert!(!is_automated("anything", &["".into()]));
     }
 
     #[test]

@@ -36,6 +36,8 @@ pub struct TuiConfig {
     pub token: Option<std::sync::Arc<crate::auth::Tokens>>,
     /// See [`ServerConfig::close_after`].
     pub close_after: Option<Duration>,
+    /// Prefixes of automated prompts, from `--automated-prompt`.
+    pub automated_prompts: Vec<String>,
 }
 
 enum AppEvent {
@@ -72,6 +74,17 @@ pub async fn run(cfg: TuiConfig) -> Result<()> {
     // Prices: the built-in table, plus any in <data dir>/hooktop/prices.json.
     let (pricing, note) = load_pricing();
     app.pricing = pricing;
+    if let Some(note) = note {
+        app.say(note);
+    }
+    // Settings: <data dir>/hooktop/config.json, plus the flags.
+    let (settings, note) = load_config();
+    app.automated_prompts = settings.automated_prompts;
+    for p in &cfg.automated_prompts {
+        if !app.automated_prompts.contains(p) {
+            app.automated_prompts.push(p.clone());
+        }
+    }
     if let Some(note) = note {
         app.say(note);
     }
@@ -162,6 +175,36 @@ async fn event_loop(
 /// Where price overrides live: next to the event store.
 pub fn prices_path() -> PathBuf {
     crate::auth::token_path().with_file_name("prices.json")
+}
+
+/// Where settings live: next to the event store.
+pub fn config_path() -> PathBuf {
+    crate::auth::token_path().with_file_name("config.json")
+}
+
+/// What `config.json` can set. Unknown keys are ignored, so a newer file
+/// still works with an older hooktop.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct Settings {
+    /// Prompts starting with one of these are automated, not yours.
+    #[serde(default)]
+    pub automated_prompts: Vec<String>,
+}
+
+/// [`Settings`] from [`config_path`], and a footer message when the file
+/// can't be read.
+fn load_config() -> (Settings, Option<String>) {
+    let path = config_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (Settings::default(), None);
+    };
+    match serde_json::from_str::<Settings>(&text) {
+        Ok(s) => (s, None),
+        Err(e) => (
+            Settings::default(),
+            Some(format!("{} couldn't be read ({e}); ignoring it", path.display())),
+        ),
+    }
 }
 
 /// The built-in prices, plus overrides from [`prices_path`] if it exists.
