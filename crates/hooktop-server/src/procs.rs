@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hooktop_core::Sample;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
@@ -157,6 +157,7 @@ pub fn spawn_sampler(hub: Weak<Hub>) {
             }
             let mut sys = System::new();
             let kind = ProcessRefreshKind::nothing().with_cpu().with_memory().without_tasks();
+            let mut cpu = CpuMeter::default();
             let mut tick: u64 = 0;
             loop {
                 std::thread::sleep(EVERY);
@@ -190,9 +191,10 @@ pub fn spawn_sampler(hub: Weak<Hub>) {
                     continue;
                 }
                 sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+                let usage = cpu.measure(&sys, Instant::now());
                 let children = children_of(&sys);
                 for (session, pid) in targets {
-                    match sample_tree(&sys, &children, Pid::from_u32(pid)) {
+                    match sample_tree(&sys, &children, &usage, Pid::from_u32(pid)) {
                         Some(s) => {
                             hub.ingest(s.to_payload(&session), s.at_ms, true);
                         }
@@ -216,19 +218,66 @@ fn children_of(sys: &System) -> HashMap<Pid, Vec<Pid>> {
     map
 }
 
+/// Per-process CPU, measured by hooktop itself from each process's CPU
+/// time between two readings.
+///
+/// sysinfo's own percentage can spike far past what the machine has (a
+/// process seen for the first time, or after a pause in sampling, reported
+/// 4000% on a 10-core Mac). Here a process counts only from its second
+/// reading, and never above the number of cores.
+#[derive(Default)]
+struct CpuMeter {
+    /// CPU time (ms), when it was read, and the process's start time (a
+    /// reused pid is a new process).
+    last: HashMap<Pid, (u64, Instant, u64)>,
+}
+
+impl CpuMeter {
+    /// CPU % per process since the last call (100 = one core busy).
+    fn measure(&mut self, sys: &System, now: Instant) -> HashMap<Pid, f32> {
+        let max = 100.0 * cores() as f32;
+        let mut usage = HashMap::new();
+        let mut next = HashMap::with_capacity(sys.processes().len());
+        for (pid, p) in sys.processes() {
+            let (cpu_ms, started) = (p.accumulated_cpu_time(), p.start_time());
+            if let Some(&(was, at, s)) = self.last.get(pid)
+                && s == started
+            {
+                let wall = now.duration_since(at).as_secs_f32() * 1000.0;
+                if wall >= 1.0 {
+                    usage.insert(*pid, (cpu_ms.saturating_sub(was) as f32 / wall * 100.0).min(max));
+                }
+            }
+            next.insert(*pid, (cpu_ms, now, started));
+        }
+        self.last = next;
+        usage
+    }
+}
+
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
 /// CPU and memory of `root` and all its descendants; `None` once it exited.
-fn sample_tree(sys: &System, children: &HashMap<Pid, Vec<Pid>>, root: Pid) -> Option<Sample> {
+fn sample_tree(
+    sys: &System,
+    children: &HashMap<Pid, Vec<Pid>>,
+    usage: &HashMap<Pid, f32>,
+    root: Pid,
+) -> Option<Sample> {
     sys.processes().get(&root)?;
     let (mut cpu, mut rss, mut procs) = (0f32, 0u64, 0u32);
     let mut top: Option<(f32, String)> = None;
     let mut stack = vec![root];
     while let Some(pid) = stack.pop() {
         let Some(p) = sys.processes().get(&pid) else { continue };
-        cpu += p.cpu_usage();
+        let p_cpu = usage.get(&pid).copied().unwrap_or(0.0);
+        cpu += p_cpu;
         rss += p.memory();
         procs += 1;
-        if pid != root && p.cpu_usage() > top.as_ref().map_or(1.0, |t| t.0) {
-            top = Some((p.cpu_usage(), p.name().to_string_lossy().into_owned()));
+        if pid != root && p_cpu > top.as_ref().map_or(1.0, |t| t.0) {
+            top = Some((p_cpu, p.name().to_string_lossy().into_owned()));
         }
         if let Some(kids) = children.get(&pid) {
             stack.extend(kids.iter().copied());
@@ -236,7 +285,8 @@ fn sample_tree(sys: &System, children: &HashMap<Pid, Vec<Pid>>, root: Pid) -> Op
     }
     Some(Sample {
         at_ms: now_ms(),
-        cpu,
+        // Many processes at once still can't use more than the whole machine.
+        cpu: cpu.min(100.0 * cores() as f32),
         rss,
         procs,
         top: top.map(|t| t.1),
@@ -268,9 +318,33 @@ mod tests {
         let kind = ProcessRefreshKind::nothing().with_cpu().with_memory().without_tasks();
         sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
         let me = Pid::from_u32(std::process::id());
-        let s = sample_tree(&sys, &children_of(&sys), me).expect("we exist");
+        let usage = HashMap::new();
+        let s = sample_tree(&sys, &children_of(&sys), &usage, me).expect("we exist");
         assert!(s.rss > 0 && s.procs >= 1, "{s:?}");
-        assert!(sample_tree(&sys, &children_of(&sys), Pid::from_u32(u32::MAX - 7)).is_none());
+        assert!(sample_tree(&sys, &children_of(&sys), &usage, Pid::from_u32(u32::MAX - 7)).is_none());
+    }
+
+    #[test]
+    fn cpu_counts_from_the_second_reading_and_stays_within_the_machine() {
+        let mut sys = System::new();
+        let kind = ProcessRefreshKind::nothing().with_cpu().with_memory().without_tasks();
+        let me = Pid::from_u32(std::process::id());
+        let mut meter = CpuMeter::default();
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+        let t0 = Instant::now();
+        assert!(meter.measure(&sys, t0).is_empty(), "nothing on the first reading");
+        // Burn some CPU, then read again.
+        let spin = Instant::now();
+        let mut x = 0u64;
+        while spin.elapsed() < Duration::from_millis(300) {
+            x = x.wrapping_mul(31).wrapping_add(7);
+        }
+        std::hint::black_box(x);
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+        let usage = meter.measure(&sys, Instant::now());
+        let mine = usage.get(&me).copied().unwrap_or(0.0);
+        assert!(mine > 10.0, "we were busy: {mine}");
+        assert!(usage.values().all(|v| *v <= 100.0 * cores() as f32));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

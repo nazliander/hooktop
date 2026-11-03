@@ -33,12 +33,18 @@ A `hooktop-sampler` thread wakes once a second. For every session that is **work
 
 1. refreshes all processes with `sysinfo` (CPU and memory only, no threads),
 2. builds a parent → children map and walks the tree under Claude Code's pid,
-3. sums CPU (percent of one core) and resident memory, counts processes, and notes the busiest descendant by name (`cargo`, `node`, …),
+3. sums CPU and resident memory, counts processes, and notes the busiest descendant by name (`cargo`, `node`, …),
 4. ingests the result as a `HooktopSample` event, which is stored, broadcast as a `sample` delta and appended to `SessionGraph::samples`.
 
 Nothing is sampled while a session waits for you, so a session left open overnight adds no rows. The thread holds only a `Weak<Hub>` and exits when the server stops.
 
-The first reading after a quiet stretch averages CPU over the whole gap, which is how `sysinfo` measures it; the next readings are per second.
+**CPU** is measured by hooktop, not taken from `sysinfo`'s percentage, which can spike far past what the machine has (4000% on a 10-core Mac) for a process it sees for the first time. For each process, hooktop divides the CPU time it used since the previous reading by the time between the readings:
+
+- A process counts from its second reading, so a new process shows 0 for its first second.
+- No process, and no session, counts above the number of cores.
+- The first reading after a quiet stretch averages over the whole gap; the next ones are per second.
+
+The value is stored as a percentage of one core (100 = one core busy). The UI shows it as cores: `4.0 cores`.
 
 ## Connection lifecycle
 
