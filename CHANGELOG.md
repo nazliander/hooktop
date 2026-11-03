@@ -4,6 +4,11 @@ Add a line under **Unreleased** with each change worth telling users about. `pac
 
 ## Unreleased
 
+## 0.1.4 - 2026-11-03
+
+- Statistics rows open what's behind them: `Tab` picks a panel, `Enter` shows every call of a tool, the longest thinking stretches with what came before and after, where a model's cost went, or a call's full details, and `Enter` again finds it in the Timeline
+- A simpler top bar: the tabs and the link status. The port, mode and version moved into the help (`?`)
+
 ## 0.1.3 - 2026-11-03
 
 - Tool calls that never got a finish (Esc, a denied permission, a follower cut off) stop when their turn or follower ends, instead of growing for hours. Sessions already recorded are corrected when the server restarts
