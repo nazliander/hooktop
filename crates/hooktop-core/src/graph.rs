@@ -405,6 +405,8 @@ impl SessionGraph {
                 last_message,
             } => {
                 let id = self.ensure_subagent(agent_id, agent_type, at, &mut out);
+                // A follower that stopped isn't running anything any more.
+                self.interrupt_tools(id, at, &mut out);
                 let h = &mut self.tasks[id as usize].header;
                 if h.status == Status::Running {
                     h.status = Status::Done;
@@ -565,6 +567,9 @@ impl SessionGraph {
 
     fn close_turn(&mut self, at: i64, out: &mut Vec<Delta>) {
         let Some(id) = self.cur.open_turn.take() else { return };
+        // A call still running when its turn ends never got its finish
+        // hook (Esc, a denied permission): it stopped here, not later.
+        self.interrupt_tools(id, at, out);
         let task = &mut self.tasks[id as usize];
         let end = task.tools.iter().filter_map(|t| t.ended_ms).max().unwrap_or(at);
         task.header.status = Status::Done;
@@ -686,8 +691,11 @@ impl SessionGraph {
         };
         let Some((task, idx)) = found else { return };
         let call = &mut self.tasks[task as usize].tools[idx];
-        if call.status != Status::Running {
-            return; // duplicate delivery
+        // Hooks can arrive out of order: a finish that lands just after its
+        // turn or follower ended still counts. Anything else is a duplicate.
+        let late = call.status == Status::Interrupted && call.id.as_str() == tool_use_id.unwrap_or("");
+        if call.status != Status::Running && !late {
+            return;
         }
         call.status = status;
         call.ended_ms = Some(ev.at_ms);
@@ -712,6 +720,18 @@ impl SessionGraph {
             .iter()
             .position(|c| c.name == name && c.status == Status::Running)?;
         Some((task, idx))
+    }
+
+    /// Mark `task`'s calls that are still running as interrupted at `at`.
+    fn interrupt_tools(&mut self, task: TaskId, at: i64, out: &mut Vec<Delta>) {
+        for i in 0..self.tasks[task as usize].tools.len() {
+            let c = &mut self.tasks[task as usize].tools[i];
+            if c.status == Status::Running {
+                c.status = Status::Interrupted;
+                c.ended_ms = Some(at.max(c.started_ms));
+                self.emit_tool(task, i, out);
+            }
+        }
     }
 
     fn interrupt_running(&mut self, at: i64, out: &mut Vec<Delta>) {
@@ -1021,6 +1041,44 @@ mod tests {
         assert_eq!(s.g.tasks[0].tools[1].status, Status::Done);
         s.ev(None, EventKind::SessionEnded { reason: None });
         assert_eq!(s.g.tasks[0].tools[0].status, Status::Interrupted);
+    }
+
+    #[test]
+    fn calls_without_a_finish_stop_with_their_turn_or_follower() {
+        let mut s = Sim::new();
+        s.ev(None, EventKind::PromptSubmitted { prompt: "go".into() });
+        // Watcher's call is denied: no finish hook ever comes.
+        s.pre(None, "w", "Bash", json!({"command": "rm -rf /"}));
+        // A follower's call is cut off when the follower stops.
+        s.pre(Some("a1"), "f", "Bash", json!({"command": "sleep 99"}));
+        let stop_at = (s.seq + 1) as i64 * 100;
+        s.ev(
+            Some("a1"),
+            EventKind::SubagentStopped {
+                agent_id: "a1".into(),
+                agent_type: "Explore".into(),
+                last_message: None,
+            },
+        );
+        let f = s.g.tasks.iter().find(|t| t.header.kind == TaskKind::Subagent).unwrap();
+        assert_eq!(f.tools[0].status, Status::Interrupted);
+        assert_eq!(f.tools[0].ended_ms, Some(stop_at));
+        // A finish that arrives late, after its follower stopped, still lands.
+        s.post(Some("a1"), "f", "Bash");
+        let f = s.g.tasks.iter().find(|t| t.header.kind == TaskKind::Subagent).unwrap();
+        assert_eq!(f.tools[0].status, Status::Done);
+
+        let turn_end = (s.seq + 1) as i64 * 100;
+        s.ev(None, EventKind::Stopped { last_message: None });
+        let turn = s.g.tasks.iter().find(|t| t.header.kind == TaskKind::Turn).unwrap();
+        assert_eq!(turn.tools[0].status, Status::Interrupted);
+        assert_eq!(turn.tools[0].ended_ms, Some(turn_end));
+        assert!(
+            s.g.tasks
+                .iter()
+                .flat_map(|t| &t.tools)
+                .all(|c| c.status != Status::Running)
+        );
     }
 
     #[test]

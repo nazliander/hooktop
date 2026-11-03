@@ -60,6 +60,7 @@ Details that keep the graph right with real-world event streams:
 - **No `PostToolBatch`** (older Claude Code): a turn closes when a new tool starts after every earlier one has finished.
 - **Duplicates** are harmless: tool calls are keyed by `tool_use_id`, and deltas are upserts.
 - **Missing `tool_use_id`**: hooktop assigns an anonymous id and pairs the finish with the oldest running call of the same name.
+- **Calls that never finish.** Claude Code sends no `PostToolUse` for a call you cancel with Esc or a permission you deny. When a turn ends (`PostToolBatch` or `Stop`) or a Follower stops (`SubagentStop`), its calls still running are marked `interrupted` at that moment, so they don't keep growing. A finish that arrives late for such a call, because hooks can land out of order, still records its real status and end.
 - **Session end** marks anything still running as `interrupted`.
 - **Samples** append to `samples` and deliberately don't touch `updated_ms` or status, so readings never reorder sessions or make an idle one look busy.
 
