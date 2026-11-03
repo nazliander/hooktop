@@ -24,6 +24,7 @@ cargo run -- --demo --no-store               # the TUI against a made-up session
 ## Pull requests
 
 - Keep each one to one change, with a test where it makes sense. The TUI has rendering tests with ratatui's `TestBackend`.
+- If users will notice the change, add a line under **Unreleased** in [CHANGELOG.md](CHANGELOG.md).
 - CI runs formatting, clippy, the tests, and a build on Rust 1.88.
 - Never commit real session data, tokens or `settings.json` files. Use the demo session or made-up payloads in tests.
 

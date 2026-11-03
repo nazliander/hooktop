@@ -43,6 +43,12 @@ jobs:
             echo "::error::tag $TAG doesn't match Cargo.toml version $want"
             exit 1
           fi
+      - name: CHANGELOG.md has notes for this version
+        run: |
+          if [ -z "$(packaging/release-notes.sh "$TAG")" ]; then
+            echo "::error::no notes for ${TAG#v} in CHANGELOG.md; run packaging/release.sh ${TAG#v} before tagging"
+            exit 1
+          fi
 
   crates:
     needs: check
@@ -99,7 +105,7 @@ jobs:
         run: |
           name="hooktop-$TAG-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/hooktop" README.md LICENSE NOTICE "dist/$name/"
+          cp "target/${{ matrix.target }}/release/hooktop" README.md CHANGELOG.md LICENSE NOTICE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           cd dist
           if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz"; else shasum -a 256 "$name.tar.gz"; fi > "$name.tar.gz.sha256"
@@ -121,6 +127,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ env.TAG }}
+          fetch-depth: 0 # tags, for the compare link in the notes
       - uses: actions/download-artifact@v5
         with:
           pattern: hooktop-*
@@ -132,10 +139,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          packaging/release-notes.sh "$TAG" > notes.md
+          printf '\nhttps://github.com/%s/compare/%s...%s\n' "$GITHUB_REPOSITORY" \
+            "$(git tag --sort=-v:refname | grep -A1 -x "$TAG" | tail -1)" "$TAG" >> notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
+            # A release made on GitHub's page keeps its own notes, unless it has none.
+            if [ -z "$(gh release view "$TAG" --json body --jq .body)" ]; then
+              gh release edit "$TAG" --notes-file notes.md
+            fi
           else
-            gh release create "$TAG" dist/* --title "hooktop $TAG" --generate-notes
+            gh release create "$TAG" dist/* --title "hooktop $TAG" --notes-file notes.md
           fi
       - name: Update the tap
         env:
