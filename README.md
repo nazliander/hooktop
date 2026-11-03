@@ -1,6 +1,6 @@
 # hooktop
 
-<img src="docs/knight.png" width="96" align="right" alt="A pixel-art knight, hooktop's mascot">
+<img src="https://raw.githubusercontent.com/nazliander/hooktop/main/docs/knight.png" width="96" align="right" alt="A pixel-art knight, hooktop's mascot">
 
 **See what Claude Code is really doing: every tool call, every subagent, what it costs your machine, and what it would cost in tokens, live in your terminal.**
 
@@ -13,7 +13,7 @@ hooktop is for developers who code with agents and want to look under the hood. 
 
 It's one small Rust binary that runs on your machine. Nothing leaves your computer.
 
-![hooktop's timeline: CPU and RAM charts over a session's history](docs/timeline.png)
+![hooktop's timeline: CPU and RAM charts over a session's history](https://raw.githubusercontent.com/nazliander/hooktop/main/docs/timeline.png)
 
 ## Quick start
 
@@ -44,11 +44,11 @@ flowchart LR
     S -- "live updates" --> TUI["Terminal UI"]
 ```
 
-Claude Code sends each event (a prompt, a tool call, a subagent starting or stopping) to hooktop. hooktop builds a graph per session, saves the raw events, measures the CPU and memory of Claude Code and everything it starts, and reads token usage from Claude Code's transcript. The terminal UI shows it all live. The technical details are in [docs/architecture](docs/architecture/README.md).
+Claude Code sends each event (a prompt, a tool call, a subagent starting or stopping) to hooktop. hooktop builds a graph per session, saves the raw events, measures the CPU and memory of Claude Code and everything it starts, and reads token usage from Claude Code's transcript. The terminal UI shows it all live. The technical details are in [docs/architecture](https://github.com/nazliander/hooktop/blob/main/docs/architecture/README.md).
 
 ## About the costs
 
-Costs are what the same tokens would cost through the Claude API, from [Anthropic's price list](https://platform.claude.com/docs/en/about-claude/pricing). On a Claude subscription you don't pay per token, so treat them as a measure of how heavy a session was. hooktop reads the token counts from Claude Code's own transcript and keeps only the numbers, never the text. To price a model hooktop doesn't know yet, add it to `prices.json`; see [docs/architecture/costs.md](docs/architecture/costs.md).
+Costs are what the same tokens would cost through the Claude API, from [Anthropic's price list](https://platform.claude.com/docs/en/about-claude/pricing). On a Claude subscription you don't pay per token, so treat them as a measure of how heavy a session was. hooktop reads the token counts from Claude Code's own transcript and keeps only the numbers, never the text. To price a model hooktop doesn't know yet, add it to `prices.json`; see [docs/architecture/costs.md](https://github.com/nazliander/hooktop/blob/main/docs/architecture/costs.md).
 
 ## Three tabs
 
@@ -60,7 +60,7 @@ Press `o` to move between them.
 
 | Graph | Statistics |
 |---|---|
-| ![Graph view](docs/graph.png) | ![Statistics view](docs/stats.png) |
+| ![Graph view](https://raw.githubusercontent.com/nazliander/hooktop/main/docs/graph.png) | ![Statistics view](https://raw.githubusercontent.com/nazliander/hooktop/main/docs/stats.png) |
 
 ## Keys
 
@@ -96,11 +96,11 @@ Run `hooktop --help` for every flag.
 
 ## Security
 
-hooktop only listens on your own machine, and every request needs a secret token that `hooktop hooks install` gives to Claude Code. Requests from web pages are refused, so a site you visit can't read your sessions or add fake ones. hooktop's files are readable only by you. Details are in [docs/architecture/security.md](docs/architecture/security.md).
+hooktop only listens on your own machine, and every request needs a secret token that `hooktop hooks install` gives to Claude Code. Requests from web pages are refused, so a site you visit can't read your sessions or add fake ones. hooktop's files are readable only by you. Details are in [docs/architecture/security.md](https://github.com/nazliander/hooktop/blob/main/docs/architecture/security.md).
 
 ## Contributing
 
-Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Please report security problems privately, as described in [SECURITY.md](SECURITY.md).
+Issues and pull requests are welcome; see [CONTRIBUTING.md](https://github.com/nazliander/hooktop/blob/main/CONTRIBUTING.md). Please report security problems privately, as described in [SECURITY.md](https://github.com/nazliander/hooktop/blob/main/SECURITY.md).
 
 ## Development
 
@@ -110,8 +110,14 @@ cargo clippy --all-targets -- -D warnings
 cargo run -- --demo --no-store
 ```
 
-To release, bump `version` in `Cargo.toml` and push a matching tag (`git tag v0.1.0 && git push origin v0.1.0`). GitHub Actions builds macOS and Linux binaries and updates the Homebrew tap.
+To release:
+
+1. Add notes under **Unreleased** in [CHANGELOG.md](https://github.com/nazliander/hooktop/blob/main/CHANGELOG.md) as you go.
+2. Run `packaging/release.sh 0.1.3`. It moves those notes under the new version and bumps the crates.
+3. Commit, push, and push a matching tag (`git tag v0.1.3 && git push origin v0.1.3`, or create a release on GitHub).
+
+GitHub Actions builds macOS and Linux binaries, publishes the GitHub release with the changelog notes, updates the Homebrew tap and publishes to crates.io.
 
 ## License
 
-The code is Apache-2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE). The knight artwork is © Nazli Ander, licensed [CC BY 4.0](docs/ARTWORK.md).
+The code is Apache-2.0: see [LICENSE](https://github.com/nazliander/hooktop/blob/main/LICENSE) and [NOTICE](https://github.com/nazliander/hooktop/blob/main/NOTICE). The knight artwork is © Nazli Ander, licensed [CC BY 4.0](https://github.com/nazliander/hooktop/blob/main/docs/ARTWORK.md).
