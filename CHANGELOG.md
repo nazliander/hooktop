@@ -4,6 +4,14 @@ Add a line under **Unreleased** with each change worth telling users about. `pac
 
 ## Unreleased
 
+## 0.1.3 - 2026-11-03
+
+- Tool calls that never got a finish (Esc, a denied permission, a follower cut off) stop when their turn or follower ends, instead of growing for hours. Sessions already recorded are corrected when the server restarts
+- CPU is measured from each process's CPU time and capped at the machine's cores, so no more 4000% spikes, and it reads as cores (`4.0 cores`)
+- CPU and RAM tiles show the latest reading while Claude works and the peak once it stops
+- Statistics: where the time went (thinking, tools, waiting for you), one Tools panel with calls and time, repeated commands grouped as `×N`, and `Agent` calls left out of the slowest list
+- `automated_prompts` in the new `config.json` (or `--automated-prompt`) keeps prompts from your own tooling out of your prompt counts
+
 ## 0.1.2 - 2026-11-03
 
 - CPU/RAM rankings mark readings that aren't a call's alone: `≈` shared (another call ran at the same time) and `↳` borrowed (the call was too short for a reading, so it uses the next one)
